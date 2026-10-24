@@ -135,9 +135,41 @@ The tests are the C# port of link-java's and link-c's: the worked example of CON
 malformed datagrams (20000 random buffers, every prefix of every valid one, 20000 mutations: only `WireException` may come out) and of
 100000 mutated control lines, 30000 junk datagrams at a live host, the JSON corpus, live sessions over loopback, every revision 4 case, and
 the seqlock under contention (a writer thread lapping a two-slot file against a reader thread; the same copy without the lock check does
-tear, and the seqlock reader accepts no torn frame).
+tear, and the seqlock reader accepts no torn frame), and the shared test vectors (see below).
+
+## Shared test vectors
+
+`tests/vectors/link/` holds the shared test vectors of the link protocol: control lines, datagrams, pixel files and scripted sessions
+over real sockets, each with the section of CONTRACT.md it comes from. They are derived from the contract alone and every implementation
+(Rust, Java, C and this one) runs the same files; `tests/vectors/link/README.md` describes the formats and `GAPS.md` what the contract
+leaves open. The directory is a **copy** of `tests/vectors/link` in the rewrite-bridge repository, without its generator, pinned by digest:
+`tests/RewriteLink.Tests/VectorTests.cs` checks every file against `SHA256SUMS`, that no other file is there, and that the SHA-256 of
+`SHA256SUMS` equals its constant `VectorsDigest`. The copy is marked `-text` in `.gitattributes`, so no line-ending conversion touches it.
+
+The runner runs with the other tests (`dotnet run --project tests/RewriteLink.Tests -c Release`). It lists all failing vectors together, with
+id, section and basis. `RBL_VECTORS_DIR` points it at another copy, `RBL_VECTORS_SKIP_LARGE=1` skips the cases that need a sparse file of up
+to 1 GiB (also useful on a filesystem without sparse files). Vectors this library is known to fail are in `KnownDisagreements` in
+`VectorTests.cs`, each with the reason: a known vector is reported but does not fail the run, and one that starts to pass does, so the list
+cannot go stale.
+
+To update the vectors, run `scripts/sync-link-vectors.sh <path to this repository>` in the rewrite-bridge repository. It replaces
+`tests/vectors/link/`, makes sure `.gitattributes` has the `-text` line and prints `VECTORS_DIGEST = ...`; put that value in `VectorsDigest`,
+then run the tests and deal with new or changed vectors (a failing one either gets fixed or goes into `KnownDisagreements` with its reason).
 
 ## Interop
+
+`tests/RewriteLink.InteropPeer` is this library's side of the scripted cross-language session of rewrite-bridge (`tests/interop/README.md`
+there): one host and one guest process run handshake, spawn and focus, five lock-step frames with camera, poses, a collision snapshot and a
+frame with depth through a real pixel file, then despawn and bye, and each prints a result line that the driver there compares. After
+`dotnet build RewriteLink.sln -c Release`:
+
+```
+dotnet tests/RewriteLink.InteropPeer/bin/Release/net8.0/InteropPeer.dll host  --port 47810 --label cs
+dotnet tests/RewriteLink.InteropPeer/bin/Release/net8.0/InteropPeer.dll guest --port 47810 --label cs
+```
+
+(start the host first; the guest retries until a host answers). The last stdout line is `RBL-INTEROP-RESULT {json}`, the exit status is 0
+if every check passed. For the rewrite-bridge driver, set `RBL_PEER_CS="dotnet <path>/InteropPeer.dll"`.
 
 `tests/interop.sh` runs the demo against itself and against the Rust `fake_host` / `fake_guest`, link-java's `LinkDemo` and link-c's `demo`,
 in both roles, each pair twice: with the guest rendering a 320x240 frame with a depth plane for every camera, and with the host sending a
