@@ -36,20 +36,6 @@ namespace Patodois.RewriteLink.Tests
         /// <summary>Vectors this library fails, id -> why. Empty when it passes them all.</summary>
         private static readonly Dictionary<string, string> KnownDisagreements = new Dictionary<string, string>
         {
-            {
-                "sess.host.control.invalid_utf8_ends_session",
-                "section 8 makes a line that is not a JSON object (here: not UTF-8) a protocol error whose receiver 'sends bye with the reason and closes', and 6.1 says every close for a protocol error writes a bye; "
-                + "Link.Ctl.NextLine sets Fatal and Link.PollControl ends the session with End(ctl.Fatal, false): a Lost event and a closed connection, but no bye line"
-            },
-            {
-                "sess.host.control.line_of_65537_bytes_ends_session",
-                "section 8: 'a longer line is a protocol error and ends the session' and 6.1: a close for a protocol error writes a bye; "
-                + "an overlong line sets Ctl.Fatal and the session ends with End(ctl.Fatal, false), without a bye (same path as the invalid UTF-8 vector)"
-            },
-            {
-                "sess.host.control.65536_bytes_without_newline_ends_session",
-                "65536 bytes without a newline can never become a line of at most 65536 bytes; the session ends as for the 65537-byte line, with End(ctl.Fatal, false) and no bye"
-            },
         };
 
         private static string _dir;

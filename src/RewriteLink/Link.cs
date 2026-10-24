@@ -446,7 +446,7 @@ namespace Patodois.RewriteLink
                 string line = ctl.NextLine();
                 if (line == null)
                 {
-                    if (ctl.Fatal != null) { End(ctl.Fatal, false); return; }
+                    if (ctl.Fatal != null) { End(ctl.Fatal, true); return; } // a protocol error: tell the peer (CONTRACT 8, 6.1)
                     break;
                 }
                 LinesReceived++;

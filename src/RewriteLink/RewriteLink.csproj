@@ -9,7 +9,7 @@
     <!-- unsafe only inside PixelFile: the seqlock needs a ref to the mapped lock word for Volatile.Read/Write -->
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <Nullable>disable</Nullable>
-    <Version>0.1.0</Version>
+    <Version>0.1.1</Version>
     <Description>The rewrite-bridge passthrough link protocol v1 (revision 4): host and guest, for game mods in C#.</Description>
     <Authors>patodois</Authors>
     <PackageLicenseExpression>MIT OR Apache-2.0</PackageLicenseExpression>
