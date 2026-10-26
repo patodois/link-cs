@@ -246,8 +246,9 @@ namespace Patodois.RewriteLink
 
             /// <summary>
             /// As <see cref="Read(ulong, int, uint, uint, bool)"/> but without the datagram's size, so the slot header's size is checked
-            /// against the file's only. Kept for callers written before revision 5; a receiver that has the <c>Frame</c> datagram should
-            /// pass its width and height (or use <see cref="Read(Wire.FrameReady, bool)"/>), which the contract requires.
+            /// against the file's only. Kept so that programs written before revision 5 still build; it is NOT conformant to CONTRACT.md 9.6
+            /// (reader step 2). A receiver that has the <c>Frame</c> datagram passes its width and height or uses
+            /// <see cref="Read(Wire.FrameReady, bool)"/>, which the contract requires.
             /// </summary>
             public Frame Read(ulong frame, int slot, bool wantDepth)
             {
@@ -257,6 +258,7 @@ namespace Patodois.RewriteLink
             private Frame ReadSlot(ulong frame, int slot, bool haveSize, uint dw, uint dh, bool wantDepth)
             {
                 if (_disposed || slot < 0 || slot >= _l.Slots) return null;
+                if (frame == 0) { SkippedOtherFrame++; return null; } // never delivered (CONTRACT.md 9.6, reader step 0)
                 if (IsGone) { SkippedGone++; return null; }
                 if (haveSize && (dw < 1 || dh < 1 || dw > (uint)_l.Width || dh > (uint)_l.Height)) { SkippedWrongSize++; return null; }
                 byte* p = _base + HeaderLen + (long)slot * _l.SlotSize; // checked at open: inside the file

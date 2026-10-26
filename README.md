@@ -86,8 +86,8 @@ Revision 5 keeps wire compatibility with revision 4 (protocol v1) and only makes
   malformed, `Wire.Encode` refuses it, and `Link.SendCollision` and `Wire.Chunks` refuse a bigger snapshot before they copy or allocate for it;
 - the pixel file reader skips a `Frame` whose datagram width or height is 0 or above the file's, or whose slot header has a width or height of
   0, above the file's or different from the datagram's, before it copies a pixel (`Reader.Read(FrameReady, bool)` and
-  `Reader.Read(frame, slot, width, height, wantDepth)`; the older `Read(frame, slot, wantDepth)` cannot compare with the datagram and checks the
-  slot header against the file only). The slot is found by the number the datagram names; it does not have to be `frame % slots`;
+  `Reader.Read(frame, slot, width, height, wantDepth)`; the older `Read(frame, slot, wantDepth)` is kept so that existing programs still build, but it cannot compare with the datagram, checks the
+  slot header against the file only and is **not conformant** to contract section 9.6). Frame 0 is always skipped. The slot is found by the number the datagram names; it does not have to be `frame % slots`;
 - already the case and now written down in the contract: the last of a repeated key wins, a `null` optional field is absent, a `bye` without a
   reason is valid (its `Reason` is `""`), `protocol` and `min_protocol` are `u16`, the decoder delivers the values of a known kind as sent.
 
