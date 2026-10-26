@@ -32,6 +32,11 @@ namespace Patodois.RewriteLink
         public const int TriangleLen = 36;
         public const int MaxTriangles = (MaxDatagram - HeaderLen - CollisionHeaderLen) / TriangleLen; // 226
         public const int FrameLen = 24;
+        /// <summary>
+        /// Most chunks one collision snapshot may have, so the largest <c>chunk_count</c> (CONTRACT.md 9.5, revision 5): 4096 chunks are
+        /// 925696 triangles, 32 MiB. A decoder drops a chunk that claims more and the encoder refuses to write one.
+        /// </summary>
+        public const int MaxCollisionChunks = 4096;
         public const int MaxLine = 65536;
         public const int MaxPendingControl = 1 << 20;
         public const int LingerMs = 200;
@@ -335,8 +340,8 @@ namespace Patodois.RewriteLink
                 CollisionChunk c = ((CollisionMsg)body).Chunk;
                 if (c.TriangleCount < 0 || c.TriangleCount > MaxTriangles) throw new WireException("triangle count " + c.TriangleCount);
                 if (c.Triangles == null || c.Triangles.Length < 9 * c.TriangleCount) throw new WireException("triangle array too short");
-                if (c.ChunkCount < 1 || c.ChunkCount > 0xFFFF || c.ChunkIndex < 0 || c.ChunkIndex >= c.ChunkCount)
-                    throw new WireException("bad value: chunk_index " + c.ChunkIndex + " of " + c.ChunkCount);
+                if (c.ChunkCount < 1 || c.ChunkCount > MaxCollisionChunks || c.ChunkIndex < 0 || c.ChunkIndex >= c.ChunkCount)
+                    throw new WireException("bad value: chunk_index " + c.ChunkIndex + " of " + c.ChunkCount + " (chunk_count is 1 to " + MaxCollisionChunks + ")");
                 payload = CollisionHeaderLen + TriangleLen * c.TriangleCount;
             }
             else if (body is FrameMsg)
@@ -467,6 +472,7 @@ namespace Patodois.RewriteLink
                     int count = (int)Get16(buf, p + 6);
                     uint n = Get32(buf, p + 24);
                     if (count == 0 || index >= count) throw new WireException("bad value: chunk_index");
+                    if (count > MaxCollisionChunks) throw new WireException("bad value: chunk_count above " + MaxCollisionChunks);
                     if (n > MaxTriangles) throw new WireException("bad value: triangle_count");
                     Exact(kind, payload, CollisionHeaderLen + TriangleLen * (int)n);
                     var tris = GetFloats(buf, p + CollisionHeaderLen, 9 * (int)n);
@@ -492,17 +498,24 @@ namespace Patodois.RewriteLink
             return new Decoded(h, body);
         }
 
-        /// <summary>The number of datagrams a snapshot of <paramref name="triangles"/> triangles needs (at least 1).</summary>
+        /// <summary>
+        /// The number of datagrams a snapshot of <paramref name="triangles"/> triangles needs (at least 1). It does not check the limit:
+        /// a result above <see cref="MaxCollisionChunks"/> means the snapshot cannot be sent.
+        /// </summary>
         public static int ChunkCount(int triangles)
         {
-            return Math.Max(1, (triangles + MaxTriangles - 1) / MaxTriangles);
+            return (int)Math.Max(1L, ((long)triangles + MaxTriangles - 1) / MaxTriangles);
         }
 
-        /// <summary>Splits a snapshot (9 floats per triangle) into datagram-sized chunks; an empty one still gives one chunk.</summary>
+        /// <summary>
+        /// Splits a snapshot (9 floats per triangle) into datagram-sized chunks; an empty one still gives one chunk. A snapshot that needs
+        /// more than <see cref="MaxCollisionChunks"/> chunks (more than 925696 triangles) is refused with a <see cref="WireException"/>
+        /// before anything is allocated.
+        /// </summary>
         public static List<CollisionChunk> Chunks(uint query, float[] center, float radius, float[] triangles, int triangleCount)
         {
             int count = ChunkCount(triangleCount);
-            if (count > 0xFFFF) throw new WireException("too many triangles");
+            if (count > MaxCollisionChunks) throw new WireException("too many triangles: a snapshot has at most " + MaxCollisionChunks + " chunks");
             var list = new List<CollisionChunk>(count);
             for (int i = 0; i < count; i++)
             {

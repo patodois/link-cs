@@ -41,6 +41,7 @@ namespace Patodois.RewriteLink.Tests
                 Eq(Wire.HeaderLen, 24, "header"); Eq(Wire.CameraLen, 152, "camera payload"); Eq(Wire.DefaultControlPort, 47800, "port");
                 Eq(Wire.MaxEntities, 1024, "entities"); Eq(Wire.MaxFrameDim, 16384, "dim"); Eq(Wire.MaxFramePixels, 67108864L, "pixels");
                 Eq(Wire.CollisionPerPoll, 32, "pacing"); Eq(Wire.MaxDatagram, 8192, "datagram");
+                Eq(Wire.MaxCollisionChunks, 4096, "collision chunks"); Eq(Wire.MaxCollisionChunks * Wire.MaxTriangles, 925696, "triangles in 4096 chunks");
             });
 
             Test("camera: a 176-byte datagram with the contract offsets", () =>
@@ -117,6 +118,45 @@ namespace Patodois.RewriteLink.Tests
                     var c = new Wire.CollisionChunk { Query = 1, ChunkIndex = bad[0], ChunkCount = bad[1], Center = new float[3], Radius = 1, Triangles = new float[0], TriangleCount = 0 };
                     Throws<WireException>(() => Wire.Encode(new Hdr(1, 0, 1, 0, 0), new Wire.CollisionMsg(c)), "chunk_index " + bad[0] + " of " + bad[1]);
                 }
+            });
+
+            Test("collision: at most 4096 chunks, on the wire, in the encoder and in the chunking (revision 5)", () =>
+            {
+                Func<int, int, byte[]> chunk = (index, count) =>
+                {
+                    var b = Wire.Encode(new Hdr(1, 0, 1, 0, 0), new Wire.CollisionMsg(new Wire.CollisionChunk
+                        { Query = 7, ChunkIndex = 0, ChunkCount = 1, Center = new float[3], Radius = 1, Triangles = new float[0], TriangleCount = 0 }));
+                    Wire.Put16(b, 28, (uint)index); Wire.Put16(b, 30, (uint)count); // the layout is the same whatever the count says: patch it in
+                    return b;
+                };
+                foreach (int[] ok in new[] { new[] { 0, 1 }, new[] { 4095, 4096 }, new[] { 0, 4096 } })
+                {
+                    byte[] b = chunk(ok[0], ok[1]);
+                    var c = ((Wire.CollisionMsg)Wire.Decode(b, b.Length).Body).Chunk;
+                    Check(c.ChunkIndex == ok[0] && c.ChunkCount == ok[1], "chunk " + ok[0] + " of " + ok[1] + " decodes");
+                }
+                foreach (int[] bad in new[] { new[] { 0, 4097 }, new[] { 4096, 4097 }, new[] { 5, 9281 }, new[] { 0, 65535 }, new[] { 65534, 65535 } })
+                {
+                    byte[] b = chunk(bad[0], bad[1]);
+                    Throws<WireException>(() => Wire.Decode(b, b.Length), "chunk " + bad[0] + " of " + bad[1]);
+                }
+                var over = new Wire.CollisionChunk { Query = 1, ChunkIndex = 0, ChunkCount = 4097, Center = new float[3], Radius = 1, Triangles = new float[0], TriangleCount = 0 };
+                Throws<WireException>(() => Wire.Encode(new Hdr(1, 0, 1, 0, 0), new Wire.CollisionMsg(over)), "the encoder refuses chunk_count 4097");
+                over.ChunkCount = 4096; over.ChunkIndex = 4095;
+                Wire.Encode(new Hdr(1, 0, 1, 0, 0), new Wire.CollisionMsg(over));
+                // the chunking helper counts without overflow and refuses before it allocates anything: the array is a few floats, the count is not
+                Eq(Wire.ChunkCount(925696), 4096, "925696 triangles are 4096 chunks"); Eq(Wire.ChunkCount(925697), 4097, "one more is 4097");
+                Eq(Wire.ChunkCount(int.MaxValue), 9502141, "no overflow near int.MaxValue");
+                Throws<WireException>(() => Wire.Chunks(1, new float[3], 1f, new float[9], 925697), "4097 chunks");
+                Throws<WireException>(() => Wire.Chunks(1, new float[3], 1f, new float[9], int.MaxValue), "int.MaxValue triangles");
+                // the largest snapshot there is: 4096 chunks, the last one full
+                var all = new float[9 * 925696];
+                all[all.Length - 1] = 42f;
+                List<Wire.CollisionChunk> chunks = Wire.Chunks(1, new float[3], 1f, all, 925696);
+                Eq(chunks.Count, 4096, "chunks"); Eq(chunks[4095].ChunkCount, 4096, "chunk_count"); Eq(chunks[4095].TriangleCount, Wire.MaxTriangles, "the last chunk is full");
+                byte[] last = Wire.Encode(new Hdr(1, 0, 1, 0, 0), new Wire.CollisionMsg(chunks[4095]));
+                var back = ((Wire.CollisionMsg)Wire.Decode(last, last.Length).Body).Chunk;
+                Check(back.ChunkIndex == 4095 && back.ChunkCount == 4096 && back.Triangles[back.Triangles.Length - 1] == 42f, "the last chunk of the largest snapshot round trips");
             });
 
             Test("frame: a 48-byte datagram; frame 0 is refused", () =>

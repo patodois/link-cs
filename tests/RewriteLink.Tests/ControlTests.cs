@@ -18,7 +18,10 @@ namespace Patodois.RewriteLink.Tests
             new object[] { "-.5", false }, new object[] { ".5", false }, new object[] { "1e", false }, new object[] { "1.0e+", false }, new object[] { "+1", false },
             new object[] { "-", false }, new object[] { "- 1", false }, new object[] { "0x10", false }, new object[] { "1e999", false }, new object[] { "Infinity", false },
             new object[] { "NaN", false },
-            new object[] { "\"\\u0041\"", true }, new object[] { "\"\\u00E9\"", true }, new object[] { "\"\\u0000\"", true }, new object[] { "\"\\/\"", true },
+            new object[] { "\"\\u0041\"", true }, new object[] { "\"\\u00E9\"", true }, new object[] { "\"\\u0000\"", false }, new object[] { "\"\\/\"", true },
+            // revision 5: U+0000 is an error however it is spelled (and u0000 after an escaped backslash is plain text; \u0001 is not NUL)
+            new object[] { "\"\\\\u0000\"", true }, new object[] { "\"\\u0001\"", true }, new object[] { "\"\\u00000\"", false }, new object[] { "\"a\\u0000b\"", false },
+            new object[] { "{\"\\u0000\":1}", false }, new object[] { "{\"a\":[1,{\"b\":\"\\u0000\"}]}", false }, new object[] { "{\"a\":\"\\u0000\",\"a\":1}", false },
             new object[] { "\"\\ud800\\udc00\"", true }, new object[] { "\"\\ud83d\\ude00\"", true }, new object[] { "\"\\uD834\\uDD1E\"", true },
             new object[] { "\"\\u004\"", false }, new object[] { "\"\\u00zz\"", false }, new object[] { "\"\\u+041\"", false }, new object[] { "\"\\u-041\"", false },
             new object[] { "\"\\u D800\"", false }, new object[] { "\"\\ud800\"", false }, new object[] { "\"\\udc00\"", false }, new object[] { "\"\\ud800x\"", false },
@@ -72,7 +75,7 @@ namespace Patodois.RewriteLink.Tests
                 Eq(((Control.Despawn)Control.Parse("{\"type\":\"despawn\",\"entity\":7,\"extra\":[1,{\"a\":null}]}")).Entity, 7u, "unknown fields are ignored");
                 Eq(((Control.Despawn)Control.Parse("{\"type\":\"despawn\",\"entity\":1,\"entity\":2}")).Entity, 2u, "the last of a repeated key wins");
                 Check(!((Control.Hello)Control.Parse("{\"type\":\"hello\",\"role\":\"guest\",\"game\":\"g\",\"protocol\":1,\"min_protocol\":1,\"udp_port\":5,\"heartbeat_ms\":250,\"timeout_ms\":2000,\"session\":null}")).Session.HasValue, "null session");
-                Check(Control.Parse("{\"type\":\"hello\\u0000x\"}") is Control.Unknown, "a type with an embedded NUL is not hello");
+                Check(Control.Parse("{\"type\":\"hello\\\\u0000x\"}") is Control.Unknown, "a type of a backslash and u0000 is an unknown type, not a NUL");
                 var esc = (Control.Spawn)Control.Parse("{\"type\":\"spawn\",\"entity\":1,\"provider\":\"a\\\"b\",\"asset\":\"\\u00e9\\ud83d\\ude00\\n\"}");
                 Check(esc.Provider == "a\"b" && esc.Asset == "\u00e9\U0001F600\n", "escapes decode");
                 Eq(((Control.Despawn)Control.Parse("{\"type\":\"despawn\",\"entity\":4294967295}")).Entity, uint.MaxValue, "the largest entity id");
@@ -98,6 +101,46 @@ namespace Patodois.RewriteLink.Tests
                 string padded = "{\"type\":\"x\"}" + new string(' ', Wire.MaxLine - 1 - 12);
                 Check(Control.Parse(padded) is Control.Unknown, "65535 bytes is fine");
                 Throws<WireException>(() => Control.Parse(padded + " "), "65536 bytes is too long");
+            });
+
+            Test("control: a U+0000 escape is a protocol error anywhere in a line (revision 5)", () =>
+            {
+                foreach (string bad in new[]
+                {
+                    "{\"type\":\"hello\\u0000x\"}",
+                    "{\"type\":\"spawn\",\"entity\":1,\"provider\":\"p\",\"asset\":\"a\\u0000b\"}",
+                    "{\"type\":\"spawn\",\"entity\":1,\"provider\":\"p\",\"asset\":\"a\",\"name\":\"\\u0000\"}",
+                    "{\"type\":\"hello\",\"role\":\"guest\",\"game\":\"g\\u0000\",\"protocol\":1,\"min_protocol\":1,\"udp_port\":5,\"heartbeat_ms\":250,\"timeout_ms\":2000}",
+                    "{\"type\":\"bye\",\"reason\":\"\\u0000\"}", "{\"type\":\"input\",\"focus\":\"host\",\"reason\":\"x\\u0000\"}",
+                    "{\"type\":\"frame_channel\",\"path\":\"/tmp/a\\u0000b\",\"width\":1,\"height\":1,\"slots\":1}",
+                    "{\"type\":\"despawn\",\"entity\":1,\"x\":\"\\u0000\"}", "{\"type\":\"despawn\",\"entity\":1,\"a\\u0000b\":1}",
+                    "{\"type\":\"despawn\",\"entity\":1,\"x\":{\"y\":[\"\\u0000\"]}}",
+                    "{\"type\":\"despawn\",\"entity\":1,\"x\":\"\\u0000\",\"x\":1}", // the value that ends up in the line is fine, the one overridden is not
+                    "{\"type\":\"despawn\",\"entity\":1,\"x\":\"\\ud83d\\u0000\"}",
+                })
+                    Throws<WireException>(() => Control.Parse(bad), bad);
+                // not NUL: the characters of an escaped backslash followed by u0000, and a raw U+0001 escape
+                Eq(((Control.Spawn)Control.Parse("{\"type\":\"spawn\",\"entity\":1,\"provider\":\"p\",\"asset\":\"a\\\\u0000b\\u0001\"}")).Asset, "a\\u0000b\u0001", "an escaped backslash before u0000 is not a NUL");
+            });
+
+            Test("control: a string handed to the writer has U+0000 replaced by U+FFFD (revision 5)", () =>
+            {
+                string nul = "a\0b\0", fixedUp = "a\uFFFDb\uFFFD";
+                var all = new Control[]
+                {
+                    new Control.Hello { Role = Role.Guest, Game = nul, Protocol = 1, MinProtocol = 1, UdpPort = 5, HeartbeatMs = 250, TimeoutMs = 2000 },
+                    new Control.Spawn(1, nul, nul, nul), new Control.Input(Role.Host, nul), new Control.FrameChannel(nul, 4, 2, 3), new Control.Bye(nul), new Control.Unknown(nul),
+                };
+                foreach (Control c in all)
+                {
+                    string line = c.ToLine();
+                    Check(line.IndexOf('\0') < 0 && line.IndexOf("\\u0000", StringComparison.Ordinal) < 0, "no NUL in " + c.GetType().Name + ": " + line);
+                    Check(line.Contains(fixedUp), "U+FFFD in its place in " + c.GetType().Name + ": " + line);
+                    Control.Parse(line); // and a receiver takes what the sender wrote
+                }
+                var sp = (Control.Spawn)Control.Parse(new Control.Spawn(1, nul, "x\0", null).ToLine());
+                Check(sp.Provider == fixedUp && sp.Asset == "x\uFFFD" && sp.Name == null, "the receiver reads the substitute");
+                Eq(((Control.Bye)Control.Parse(new Control.Bye("\0").ToLine())).Reason, "\uFFFD", "bye reason");
             });
 
             Test("control: lines round trip through the writer", () =>

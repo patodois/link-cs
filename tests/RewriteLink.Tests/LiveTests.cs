@@ -256,6 +256,29 @@ namespace Patodois.RewriteLink.Tests
                 }
             });
 
+            Test("revision 5: a snapshot of more than 4096 chunks is refused before anything is copied or queued", () =>
+            {
+                using (var p = new Pair())
+                {
+                    const int tooMany = Wire.MaxCollisionChunks * Wire.MaxTriangles + 1; // 925697 triangles: 4097 chunks
+                    uint q1 = p.Host.SendCollision(new float[3], 5f, Tris(1));
+                    Check(Until(3000, () => { p.Pump(); return p.G<LinkEvent.Collision>() == 1; }), "the first snapshot arrives");
+                    // the size is checked before the array is looked at: a small array and a huge count are refused for the count
+                    try { p.Host.SendCollision(new float[3], 5f, new float[9], tooMany); throw new Exception("accepted 925697 triangles"); }
+                    catch (ArgumentException e) { Check(e.Message.Contains("4096"), "the message names the limit: " + e.Message); }
+                    Throws<ArgumentException>(() => p.Host.SendCollision(new float[3], 5f, new float[9], int.MaxValue), "int.MaxValue triangles");
+                    Throws<ArgumentException>(() => p.Host.SendCollision(new float[3], 5f, new float[9 * tooMany]), "a real array of 925697 triangles");
+                    // the limit itself is fine (4096 chunks); the next snapshot replaces the queued chunks at once, so only one query completes
+                    uint q2 = p.Host.SendCollision(new float[3], 5f, new float[9 * (tooMany - 1)]);
+                    Eq(q2, q1 + 1, "the refused snapshots used no query number");
+                    uint q3 = p.Host.SendCollision(new float[3], 5f, Tris(3));
+                    Eq(q3, q2 + 1, "next query");
+                    Check(Until(3000, () => { p.Pump(); return p.G<LinkEvent.Collision>() == 2; }), "the last snapshot arrives");
+                    var last = p.GE.OfType<LinkEvent.Collision>().Last();
+                    Check(last.Query == q3 && last.TriangleCount == 3, "the replacing snapshot, not a refused one");
+                }
+            });
+
             Test("an empty collision snapshot is one chunk", () =>
             {
                 using (var p = new Pair())

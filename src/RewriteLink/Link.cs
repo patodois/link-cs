@@ -799,6 +799,8 @@ namespace Patodois.RewriteLink
         /// Queues a collision snapshot in as many chunks as it needs and returns its query number. The chunks go out
         /// <see cref="Wire.CollisionPerPoll"/> per <see cref="Poll()"/>, so a big snapshot never overflows the receiver's socket buffer; a snapshot
         /// queued while an older one still has chunks waiting replaces them (the receiver would discard the old query anyway). The triangles are copied.
+        /// A snapshot of more than <see cref="Wire.MaxCollisionChunks"/> chunks (more than 925696 triangles) is refused with an <see cref="ArgumentException"/>, before
+        /// anything is copied; the caller keeps the triangles nearest to <paramref name="center"/> and sends those.
         /// </summary>
         public uint SendCollision(float[] center, float radius, float[] triangles, int triangleCount)
         {
@@ -806,6 +808,8 @@ namespace Patodois.RewriteLink
             {
                 if (_state != State.Live) throw new NotConnectedException();
                 if (center == null || center.Length != 3) throw new ArgumentException("center needs 3 floats");
+                if (Wire.ChunkCount(triangleCount) > Wire.MaxCollisionChunks)
+                    throw new ArgumentException("too many triangles: a snapshot has at most " + Wire.MaxCollisionChunks + " chunks (" + Wire.MaxCollisionChunks * Wire.MaxTriangles + " triangles)");
                 if (triangleCount < 0 || triangles.Length < 9 * (long)triangleCount) throw new ArgumentException("triangles holds fewer than triangleCount triangles");
                 uint query = _nextQuery;
                 List<Wire.CollisionChunk> chunks = Wire.Chunks(query, (float[])center.Clone(), radius, triangles, triangleCount);

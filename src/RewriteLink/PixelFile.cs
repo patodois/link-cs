@@ -8,7 +8,7 @@ using System.Threading;
 namespace Patodois.RewriteLink
 {
     /// <summary>
-    /// The shared-memory pixel file of CONTRACT.md section 9.6 (revision 4): a <see cref="Reader"/> for the receiving side (maps the file
+    /// The shared-memory pixel file of CONTRACT.md section 9.6 (revision 5): a <see cref="Reader"/> for the receiving side (maps the file
     /// read-only, checks it, copies a slot with the seqlock) and a <see cref="Writer"/> for the sending side.
     ///
     /// THE SEQLOCK AND THE .NET MEMORY MODEL. The writer makes a slot's 64-bit <c>lock</c> odd while it writes and even afterwards; the
@@ -81,7 +81,7 @@ namespace Patodois.RewriteLink
         private static bool IsAbsoluteHere(string path) { return IsAbsolute(path, System.IO.Path.DirectorySeparatorChar == '\\'); }
 
         /// <summary>
-        /// Checks a pixel file header against the file's length, as revision 4 says: the limits come first (width and height 1 to 16384,
+        /// Checks a pixel file header against the file's length, as revision 4 and 5 say: the limits come first (width and height 1 to 16384,
         /// at most 2^26 pixels, 1 to 16 slots, stride exactly width * 4), then every size is computed with overflow checks. An unknown
         /// <c>depth_format</c> is not an error: the file reads as colour only. Pure: it reads only the 64 header bytes.
         /// </summary>
@@ -155,7 +155,7 @@ namespace Patodois.RewriteLink
             public bool HasDepth { get { return _l.DepthFormat == DepthLinearF32; } }
 
             // Diagnostics: why Read returned null.
-            public long SkippedBusy, SkippedOtherFrame, SkippedOverwritten, SkippedGone;
+            public long SkippedBusy, SkippedOtherFrame, SkippedOverwritten, SkippedGone, SkippedWrongSize;
 
             private Reader(FileStream file, MemoryMappedFile mmf, MemoryMappedViewAccessor view, byte* b, long mapped, Layout l)
             {
@@ -222,17 +222,51 @@ namespace Patodois.RewriteLink
                 }
             }
 
-            /// <summary>Copies slot <paramref name="slot"/> out if it holds frame <paramref name="frame"/> and was not written while copying; null otherwise (skip the frame and wait for the next one).</summary>
+            /// <summary>
+            /// Reads the frame a <c>Frame</c> datagram announces: <see cref="Read(ulong, int, uint, uint, bool)"/> with the datagram's values.
+            /// A <see cref="Wire.FrameReady.Slot"/> that does not fit an int is a slot that does not exist.
+            /// </summary>
+            public Frame Read(Wire.FrameReady ready, bool wantDepth)
+            {
+                if (ready == null || ready.Slot > int.MaxValue) return null;
+                return Read(ready.Frame, (int)ready.Slot, ready.Width, ready.Height, wantDepth);
+            }
+
+            /// <summary>
+            /// Copies slot <paramref name="slot"/> out if it holds frame <paramref name="frame"/> and was not written while copying; null otherwise
+            /// (skip the frame and wait for the next one). <paramref name="width"/> and <paramref name="height"/> are the ones the
+            /// <c>Frame</c> datagram carries (CONTRACT.md 9.6, reader step 2, revision 5): the frame is skipped, before any pixel is copied, if
+            /// either is 0 or above the file's, or if the slot header's width or height is 0, above the file's, or not equal to the datagram's.
+            /// The slot does not have to be <c>frame % slots</c>: the slot is found by the number the datagram names.
+            /// </summary>
+            public Frame Read(ulong frame, int slot, uint width, uint height, bool wantDepth)
+            {
+                return ReadSlot(frame, slot, true, width, height, wantDepth);
+            }
+
+            /// <summary>
+            /// As <see cref="Read(ulong, int, uint, uint, bool)"/> but without the datagram's size, so the slot header's size is checked
+            /// against the file's only. Kept for callers written before revision 5; a receiver that has the <c>Frame</c> datagram should
+            /// pass its width and height (or use <see cref="Read(Wire.FrameReady, bool)"/>), which the contract requires.
+            /// </summary>
             public Frame Read(ulong frame, int slot, bool wantDepth)
+            {
+                return ReadSlot(frame, slot, false, 0, 0, wantDepth);
+            }
+
+            private Frame ReadSlot(ulong frame, int slot, bool haveSize, uint dw, uint dh, bool wantDepth)
             {
                 if (_disposed || slot < 0 || slot >= _l.Slots) return null;
                 if (IsGone) { SkippedGone++; return null; }
+                if (haveSize && (dw < 1 || dh < 1 || dw > (uint)_l.Width || dh > (uint)_l.Height)) { SkippedWrongSize++; return null; }
                 byte* p = _base + HeaderLen + (long)slot * _l.SlotSize; // checked at open: inside the file
                 long l1 = Volatile.Read(ref *(long*)p); // step 1: acquire load
                 if ((l1 & 1) != 0) { SkippedBusy++; return null; }
                 ulong f = *(ulong*)(p + 8), timeUs = *(ulong*)(p + 16);
                 uint camSeq = *(uint*)(p + 24), w = *(uint*)(p + 28), h = *(uint*)(p + 32);
-                if (f != frame || w < 1 || h < 1 || w > (uint)_l.Width || h > (uint)_l.Height) { SkippedOtherFrame++; return null; }
+                if (f != frame) { SkippedOtherFrame++; return null; }
+                // step 2: the slot header's size must be 1 to the file's, and the datagram's, before anything is copied
+                if (w < 1 || h < 1 || w > (uint)_l.Width || h > (uint)_l.Height || (haveSize && (w != dw || h != dh))) { SkippedWrongSize++; return null; }
                 var rgba = new byte[(int)w * (int)h * 4];
                 int row = (int)w * 4;
                 fixed (byte* dst = rgba)

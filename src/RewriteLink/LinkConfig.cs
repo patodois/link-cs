@@ -15,7 +15,10 @@ namespace Patodois.RewriteLink
         public long TimeoutMs = 2000;
         /// <summary>Guest: how often to retry connecting while no host answers.</summary>
         public long ReconnectMs = 500;
-        /// <summary>Receiver limit on one assembled collision snapshot; a bigger one is dropped (and counted as malformed).</summary>
+        /// <summary>
+        /// Receiver limit on one assembled collision snapshot; a bigger one is dropped (and counted as malformed). The protocol itself allows at most
+        /// <see cref="Wire.MaxCollisionChunks"/> chunks (925696 triangles), so the default is never reached; a smaller value is the receiver's own choice.
+        /// </summary>
         public int MaxCollisionTriangles = 2097152;
 
         public LinkConfig(string game) { Game = game; }

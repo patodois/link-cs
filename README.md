@@ -1,6 +1,6 @@
 # link-cs
 
-A **C#** implementation of the **rewrite-bridge passthrough link protocol v1** (contract revision 4), so that a
+A **C#** implementation of the **rewrite-bridge passthrough link protocol v1** (contract revision 5), so that a
 game mod written for .NET or Unity (BepInEx, MelonLoader, a Valheim or Unturned mod ...) can be a **host** or a
 **guest** next to any other game or rewrite that speaks it. The protocol is defined by `docs/CONTRACT.md` in the
 rewrite-bridge repository; this library is one implementation of it, next to the Rust crate,
@@ -64,20 +64,34 @@ guest.Close();
 |---|---|
 | `Link.Host(cfg)`, `Link.Guest(cfg)` | Create one side. `LinkConfig` has `Game`, `ControlPort` (47800), `UdpPort`, `HeartbeatMs` (250, clamped to 10..10000), `TimeoutMs` (2000), `ReconnectMs`, `MaxCollisionTriangles`. |
 | `Poll()`, `Poll(List<LinkEvent>)` | **Never blocks.** Handshake, reads both channels, heartbeats, at most 32 collision chunks, the watchdog. The second form appends to your list, so a frame loop allocates no list. |
-| `SendCamera`, `SendPoses`, `SendCollision`, `SendFrame` | State datagrams. `SendCollision` takes 9 floats per triangle, copies them and queues the chunks (paced; a newer snapshot replaces the queued one). `SendCamera` returns the `seq` a guest quotes in `FrameReady.CameraSeq`. |
+| `SendCamera`, `SendPoses`, `SendCollision`, `SendFrame` | State datagrams. `SendCollision` takes 9 floats per triangle, copies them and queues the chunks (paced; a newer snapshot replaces the queued one); more than `Wire.MaxCollisionChunks` (4096) chunks, 925696 triangles, throws `ArgumentException` before anything is copied. `SendCamera` returns the `seq` a guest quotes in `FrameReady.CameraSeq`. |
 | `Spawn`, `Despawn`, `SetFocus`, `AnnounceFrames` | Control messages. |
 | `Disconnect(reason)`, `Close()` / `Dispose()` | `bye`, half-close, drain (CONTRACT 6.1). `Disconnect` does not block; `Close` may block for up to about 250 ms. |
 | `IsConnected`, `Peer`, `Focus`, `ControlPort`, `UdpPort`, `Malformed`, `Stale`, `Foreign`, `UnknownEntity`, `SpawnIgnored`, `SendDropped`, `DatagramsSent/Received`, `LinesSent/Received` | State and statistics. |
-| `PixelFile.Writer`, `PixelFile.Reader` | The pixel file with the seqlock, colour and the optional linear depth plane. |
+| `PixelFile.Writer`, `PixelFile.Reader` | The pixel file with the seqlock, colour and the optional linear depth plane. Read a `Frame` datagram with `reader.Read(frameReady, wantDepth)`, which checks its width and height against the file and the slot header. |
 | `Wire`, `Control`, `Quat` | The codecs and small helpers in the link's conventions (right-handed, +Y up, +Z front). |
 
 Events are `LinkEvent.Connected`, `Lost`, `HandshakeFailed`, `Camera`, `Poses`, `Collision`, `Frame`, `Spawn`, `Despawn`,
 `Focus`, `FrameChannel`. Every public method takes the link's lock, so a game thread can send while a helper thread polls.
 Sending without a session throws `NotConnectedException`; a value the contract forbids throws `WireException`.
 
-## Contract revision 4
+## Contract revision 5 (and 4)
 
-All of it is implemented, each rule with a test that fails without it:
+Revision 5 keeps wire compatibility with revision 4 (protocol v1) and only makes the validation stricter; version 0.1.2 of the library follows it:
+
+- a `\u0000` escape is an error in any string or key of a control line, wherever in the line it is (an unknown field, a nested value, a value
+  that a later duplicate key overrides); a string handed to the control writer (`game`, `provider`, `asset`, `name`, a reason, a path) has
+  U+0000 replaced by U+FFFD;
+- a collision snapshot has at most `Wire.MaxCollisionChunks` = 4096 chunks (925696 triangles): a `chunk_count` above it makes the datagram
+  malformed, `Wire.Encode` refuses it, and `Link.SendCollision` and `Wire.Chunks` refuse a bigger snapshot before they copy or allocate for it;
+- the pixel file reader skips a `Frame` whose datagram width or height is 0 or above the file's, or whose slot header has a width or height of
+  0, above the file's or different from the datagram's, before it copies a pixel (`Reader.Read(FrameReady, bool)` and
+  `Reader.Read(frame, slot, width, height, wantDepth)`; the older `Read(frame, slot, wantDepth)` cannot compare with the datagram and checks the
+  slot header against the file only). The slot is found by the number the datagram names; it does not have to be `frame % slots`;
+- already the case and now written down in the contract: the last of a repeated key wins, a `null` optional field is absent, a `bye` without a
+  reason is valid (its `Reason` is `""`), `protocol` and `min_protocol` are `u16`, the decoder delivers the values of a known kind as sent.
+
+Revision 4, all of it implemented, each rule with a test that fails without it:
 
 - paced collision, at most 32 chunks per `Poll` (fewer if the OS granted a small receive buffer: Linux keeps at most
   `net.core.rmem_max`), a newer snapshot replaces queued chunks; a 4 MiB UDP receive buffer is requested;
@@ -102,8 +116,8 @@ What .NET cannot do, and what is done instead:
   (release), and `Thread.MemoryBarrier()` (a full fence, stronger than the contract's acquire and release fences) where the contract has a
   fence. 64-bit processes only (a 64-bit access to the lock word is atomic there); `PixelFile` throws on a big-endian machine.
 
-Choices that the contract leaves open, made as in link-c: a collision snapshot of more than `MaxCollisionTriangles` (2097152) is
-dropped and counted as malformed; a `hello` with `udp_port` 0 is rejected; one line goes to `Console.Error` per session when a peer
+Choices that the contract leaves open, made as in link-c: a collision snapshot of more than `MaxCollisionTriangles` (2097152, above what 4096
+chunks can hold, so only a lower value of your own ever applies) is dropped and counted as malformed; a `hello` with `udp_port` 0 is rejected; one line goes to `Console.Error` per session when a peer
 overflows the entity table.
 
 ## Loading it in BepInEx or MelonLoader
@@ -133,7 +147,7 @@ dotnet run --project tests/RewriteLink.Tests -c Release       # a plain console 
 
 The tests are the C# port of link-java's and link-c's: the worked example of CONTRACT.md section 11 byte for byte, the codecs, a fuzz of
 malformed datagrams (20000 random buffers, every prefix of every valid one, 20000 mutations: only `WireException` may come out) and of
-100000 mutated control lines, 30000 junk datagrams at a live host, the JSON corpus, live sessions over loopback, every revision 4 case, and
+100000 mutated control lines, 30000 junk datagrams at a live host, the JSON corpus, live sessions over loopback, every revision 4 and 5 case, and
 the seqlock under contention (a writer thread lapping a two-slot file against a reader thread; the same copy without the lock check does
 tear, and the seqlock reader accepts no torn frame), and the shared test vectors (see below).
 

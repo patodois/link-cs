@@ -104,7 +104,7 @@ namespace Patodois.RewriteLink.Demo
                             break;
                         case LinkEvent.Frame fr:
                         {
-                            PixelFile.Frame f = reader?.Read(fr.Value.Frame, (int)fr.Value.Slot, true);
+                            PixelFile.Frame f = reader?.Read(fr.Value, true);
                             if (f == null) framesMissed++;
                             else { framesRead++; lastFrame = Describe(f); }
                             break;

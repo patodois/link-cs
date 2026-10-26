@@ -10,7 +10,9 @@ namespace Patodois.RewriteLink
     /// because a line that one implementation takes and another refuses is a way to make them disagree: numbers
     /// follow the JSON grammar (no leading zeros, no "1.", no "+1"), "-0" is a float (so no integer), a number
     /// beyond the range of a double is an error, a unicode escape takes exactly four hex digits and surrogate
-    /// escapes must come as a valid pair, and arrays and objects nest at most 127 deep.
+    /// escapes must come as a valid pair, a \u0000 escape is an error in any string or key (CONTRACT.md section 8, "Syntax of a line", 4:
+    /// the C implementation cannot hold one, so none accepts it; it is refused even in a value that a later duplicate key overrides, because the scanner
+    /// sees every string), and arrays and objects nest at most 127 deep.
     ///
     /// Values come back as: string, boxed ulong (a non-negative integer that fits), null, or <see cref="Other"/>
     /// for any other valid value. Only the top-level object's members are kept.
@@ -39,6 +41,10 @@ namespace Patodois.RewriteLink
             return v;
         }
 
+        /// <summary>
+        /// A string as a JSON string literal. U+0000 is written as U+FFFD, since a line with a \u0000 escape is a protocol error for every
+        /// receiver (CONTRACT.md section 8, "Syntax of a line", 4).
+        /// </summary>
         public static string Quote(string s)
         {
             var b = new StringBuilder(s.Length + 2);
@@ -52,6 +58,7 @@ namespace Patodois.RewriteLink
                     case '\n': b.Append("\\n"); break;
                     case '\r': b.Append("\\r"); break;
                     case '\t': b.Append("\\t"); break;
+                    case '\0': b.Append('\uFFFD'); break;
                     default:
                         if (c < 0x20) b.Append("\\u").Append(((int)c).ToString("x4", CultureInfo.InvariantCulture));
                         else b.Append(c);
@@ -230,6 +237,7 @@ namespace Patodois.RewriteLink
                         case 'u':
                         {
                             char u = Hex4();
+                            if (u == '\0') throw new JsonException("U+0000 in a string");
                             if (char.IsHighSurrogate(u))
                             {
                                 if (I + 1 >= _s.Length || _s[I] != '\\' || _s[I + 1] != 'u') throw new JsonException("lone leading surrogate in hex escape");

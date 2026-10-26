@@ -104,6 +104,40 @@ namespace Patodois.RewriteLink.Tests
                 }
             });
 
+            Test("pixel file: the Frame datagram's size must fit the file and equal the slot header's (revision 5)", () =>
+            {
+                string p = TempPath("size.frames");
+                using (var w = new PixelFile.Writer(p, 4, 2, 3, false))
+                using (var r = PixelFile.Reader.Open(p))
+                {
+                    var px = new byte[3 * 2 * 4];
+                    for (int i = 0; i < px.Length; i++) px[i] = (byte)(i + 1);
+                    w.Write(px, null, 3, 2, 9, 1); // a 3 x 2 frame in a file for 4 x 2: slot 1
+                    var fr = r.Read(1, 1, 3, 2, false);
+                    Check(fr != null && fr.Width == 3 && fr.Height == 2 && fr.Rgba.SequenceEqual(px), "the datagram and the slot header agree");
+                    Check(r.Read(new Wire.FrameReady(1, 1, 9, 3, 2), false) != null, "the overload that takes the datagram's values");
+                    Check(r.Read(1, 1, false) != null, "the overload without a size reads the slot header's");
+                    long skipped = r.SkippedWrongSize;
+                    foreach (uint[] wh in new[] { new uint[] { 4, 2 }, new uint[] { 3, 3 }, new uint[] { 2, 2 }, new uint[] { 3, 1 }, new uint[] { 0, 2 }, new uint[] { 3, 0 }, new uint[] { 0, 0 },
+                        new uint[] { 5, 2 }, new uint[] { 3, 3000 }, new uint[] { uint.MaxValue, uint.MaxValue } })
+                        Check(r.Read(1, 1, wh[0], wh[1], true) == null, "datagram " + wh[0] + "x" + wh[1] + " against a slot header of 3x2 is skipped");
+                    Eq(r.SkippedWrongSize, skipped + 10, "counted");
+                    Check(r.Read(new Wire.FrameReady(1, 0x80000001u, 9, 3, 2), false) == null, "a slot that does not fit an int does not exist");
+                    // a slot header that is 0, above the file's, or not what the datagram says
+                    int hdr = 64 + (int)w.SlotSize; // slot 1; width at +28, height at +32
+                    Patch(p, hdr + 28, 0, 4);
+                    Check(r.Read(1, 1, 0, 2, false) == null && r.Read(1, 1, 3, 2, false) == null, "slot header width 0");
+                    Check(r.Read(1, 1, false) == null, "slot header width 0, without a datagram size");
+                    Patch(p, hdr + 28, 3, 4); Patch(p, hdr + 32, 0, 4);
+                    Check(r.Read(1, 1, 3, 0, false) == null && r.Read(1, 1, 3, 2, false) == null, "slot header height 0");
+                    Patch(p, hdr + 28, 5, 4); Patch(p, hdr + 32, 2, 4);
+                    Check(r.Read(1, 1, 5, 2, false) == null, "slot header width above the file's, the datagram says the same");
+                    Patch(p, hdr + 28, 4, 4); Patch(p, hdr + 32, 2, 4);
+                    Check(r.Read(1, 1, 3, 2, false) == null, "slot header 4x2, datagram 3x2");
+                    Check(r.Read(1, 1, 4, 2, false) != null, "slot header 4x2, datagram 4x2");
+                }
+            });
+
             Test("pixel file: malformed files are refused, an unknown depth_format reads as colour only", () =>
             {
                 string p = TempPath("d.frames");

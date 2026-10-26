@@ -426,7 +426,7 @@ namespace Patodois.RewriteLink.InteropPeer
             else if (_reader == null) err = "no pixel file is open";
             else
             {
-                PixelFile.Frame f = _reader.Read(fr.Frame, (int)fr.Slot, true);
+                PixelFile.Frame f = _reader.Read(fr, true);
                 if (f == null) err = "the frame is not in the pixel file (or was skipped)";
                 else if (f.CameraSeq != _cameraSeq) err = "camera_seq in the slot is " + f.CameraSeq + ", expected " + _cameraSeq;
                 else err = Data.ComparePixels(f, _k);

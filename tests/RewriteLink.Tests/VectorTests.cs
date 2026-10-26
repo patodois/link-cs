@@ -31,7 +31,7 @@ namespace Patodois.RewriteLink.Tests
         /// the vectors: run scripts/sync-link-vectors.sh REPO_DIR in the rewrite-bridge repository (it copies the directory and prints
         /// "VECTORS_DIGEST = ..."), paste that value here, then run the tests and sort out the new or changed vectors.
         /// </summary>
-        private const string VectorsDigest = "858a48ffc10cd1ef4d2867844c34e9fa952b826d8034ff9cee88dcc062beba5d";
+        private const string VectorsDigest = "2cb6121126bd62ac753041c73a3ddb8d5c762c7adf0b749f7fa5672e22e90603";
 
         /// <summary>Vectors this library fails, id -> why. Empty when it passes them all.</summary>
         private static readonly Dictionary<string, string> KnownDisagreements = new Dictionary<string, string>
@@ -360,6 +360,16 @@ namespace Patodois.RewriteLink.Tests
             return b.ToString();
         }
 
+        private static string KindName(Wire.Datagram d)
+        {
+            if (d is Wire.HeartbeatMsg) return "heartbeat";
+            if (d is Wire.CameraMsg) return "camera";
+            if (d is Wire.PoseMsg) return "pose";
+            if (d is Wire.CollisionMsg) return "collision";
+            if (d is Wire.FrameMsg) return "frame";
+            return "unknown kind " + d.Kind;
+        }
+
         private static string Clip(string s) { return s.Length > 400 ? s.Substring(0, 400) + "... (" + s.Length + " chars)" : s; }
 
         private static string CheckDatagram(Dictionary<string, object> c)
@@ -378,6 +388,13 @@ namespace Patodois.RewriteLink.Tests
                     var u = got == null ? null : got.Body as Wire.UnknownMsg;
                     if (u != null && u.Kind == (int)J.U32(c["kind"]) && u.PayloadLen == (int)J.U32(c["payload_len"])) return null;
                     return "expected an unknown kind " + J.Str(c, "kind", J.Write(c["kind"])) + ", got " + (got == null ? "a rejection (" + rejected + ")" : Clip(Describe(got.Body)));
+                }
+                case "accept":
+                {
+                    // revision 5: the values are not checked (a NaN has no JSON form), so only the kind is compared
+                    if (got == null) return "rejected (" + J.Str(c, "why", "") + "): " + rejected;
+                    string want = J.Str(c, "kind", null), have = KindName(got.Body);
+                    return have == want ? null : "decoded as " + have + ", expected " + want;
                 }
                 case "decode":
                 {
@@ -451,7 +468,7 @@ namespace Patodois.RewriteLink.Tests
             ulong frame = J.U64(rd["frame"]);
             int slot = (int)J.U32(rd["slot"]);
             bool wantDepth = J.IsTrue(rd, "want_depth");
-            PixelFile.Frame got = reader.Read(frame, slot, wantDepth);
+            PixelFile.Frame got = reader.Read(frame, slot, J.U32(rd["width"]), J.U32(rd["height"]), wantDepth);
             switch (J.Str(rd, "expect", null))
             {
                 case "skip":
@@ -657,15 +674,25 @@ namespace Patodois.RewriteLink.Tests
                 using (var writer = new PixelFile.Writer(path, width, height, slots, depth))
                 {
                     var writes = (List<object>)w["writes"];
+                    ulong done = 0; // accepted writes so far: a refused write uses no frame number
                     for (int i = 0; i < writes.Count; i++)
                     {
                         var wr = (Dictionary<string, object>)writes[i];
                         byte[] rgba = Unhex(J.Str(wr, "rgba", null));
                         float[] d = wr["depth"] is List<object> dl ? dl.Select(J.F32).ToArray() : null;
-                        ulong frame;
+                        bool refused = J.Str(wr, "expect", null) == "refused";
+                        ulong frame = 0;
+                        string failure = null;
                         try { frame = writer.Write(rgba, d, (int)J.U32(wr["width"]), (int)J.U32(wr["height"]), J.U32(wr["camera_seq"]), J.U64(wr["time_us"])); }
-                        catch (Exception e) { return "write " + i + " failed: " + e.GetType().Name + ": " + e.Message; }
-                        if (frame != (ulong)i + 1) return "write " + i + " numbered the frame " + frame;
+                        catch (Exception e) { failure = e.GetType().Name + ": " + e.Message; }
+                        if (refused)
+                        {
+                            if (failure == null) return "write " + i + " was accepted as frame " + frame + " (" + J.Str(wr, "why", "") + ")";
+                            continue;
+                        }
+                        if (failure != null) return "write " + i + " failed: " + failure;
+                        done++;
+                        if (frame != done) return "write " + i + " numbered the frame " + frame + ", expected " + done;
                     }
                     byte[] got;
                     using (var f = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
@@ -845,6 +872,7 @@ namespace Patodois.RewriteLink.Tests
                         var c = (LinkEvent.Collision)e;
                         type = "collision";
                         d["query"] = (long)c.Query; d["triangles"] = (long)c.TriangleCount;
+                        d["center"] = c.Center.Select(x => (object)(double)x).ToList(); d["radius"] = (double)c.Radius;
                         break;
                     }
                     case LinkEventKind.Frame:
