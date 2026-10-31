@@ -12,6 +12,7 @@ namespace Patodois.RewriteLink.Tests
             ControlTests.Run();
             LiveTests.Run();
             PixelTests.Run();
+            TokenTests.Run();
             VectorTests.Run();
             T.Cleanup();
             Console.WriteLine();

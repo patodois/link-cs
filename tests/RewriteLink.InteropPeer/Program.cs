@@ -1,6 +1,11 @@
 // The C# peer of the cross-language interop session of the link (rewrite-bridge: tests/interop/README.md).
 //
-//   InteropPeer host|guest --port PORT --label LABEL
+//   InteropPeer host  --port PORT --label LABEL [--endpoint FILE [--expect-unauthorized]]
+//   InteropPeer guest --port PORT --label LABEL [--endpoint FILE [--wrong-token]]
+//
+// With --endpoint (contract revision 6, section 6.2) the host has a token that its library generates and writes, with the port it bound, to FILE (PORT is 0
+// then); the guest gives its library FILE as its endpoint file and ignores PORT. --expect-unauthorized / --wrong-token run the refusal scenario: the guest
+// reads FILE, connects with the file's token spoiled and must be answered "unauthorized"; the host must report that. The peer never prints a token.
 //
 // Two processes, one host and one guest, run the same scripted session over real sockets and a real pixel file: handshake, spawn and
 // focus, five lock-step frames (camera, poses, a collision snapshot, a frame with depth read back from the pixel file), despawn and bye.
@@ -22,26 +27,44 @@ namespace Patodois.RewriteLink.InteropPeer
         public static int Main(string[] args)
         {
             string role = args.Length > 0 ? args[0] : null;
-            string label = null;
+            string label = null, endpoint = null;
             int port = -1;
+            bool expectUnauthorized = false, wrongToken = false;
             bool bad = role != "host" && role != "guest";
-            for (int i = 1; !bad && i < args.Length; i += 2)
+            for (int i = 1; !bad && i < args.Length; i++)
             {
-                if (i + 1 >= args.Length) { bad = true; break; }
-                if (args[i] == "--port")
+                string a = args[i];
+                if (a == "--expect-unauthorized") expectUnauthorized = true;
+                else if (a == "--wrong-token") wrongToken = true;
+                else if (i + 1 >= args.Length) bad = true;
+                else if (a == "--port")
                 {
-                    if (!int.TryParse(args[i + 1], NumberStyles.None, CultureInfo.InvariantCulture, out port) || port < 1 || port > 65535) bad = true;
+                    if (!int.TryParse(args[++i], NumberStyles.None, CultureInfo.InvariantCulture, out port) || port < 0 || port > 65535) bad = true;
                 }
-                else if (args[i] == "--label") label = args[i + 1];
+                else if (a == "--label") label = args[++i];
+                else if (a == "--endpoint") endpoint = args[++i];
                 else bad = true;
             }
-            if (bad || port < 0 || string.IsNullOrEmpty(label))
+            if (bad || port < 0 || string.IsNullOrEmpty(label) || (endpoint != null && endpoint.Length == 0)
+                || (port == 0 && endpoint == null)
+                || (expectUnauthorized && (role != "host" || endpoint == null)) || (wrongToken && (role != "guest" || endpoint == null)))
             {
-                Console.Error.WriteLine("usage: InteropPeer host|guest --port PORT --label LABEL");
+                Console.Error.WriteLine("usage: InteropPeer host --port PORT --label LABEL [--endpoint FILE [--expect-unauthorized]]\n"
+                    + "       InteropPeer guest --port PORT --label LABEL [--endpoint FILE [--wrong-token]]");
                 return 2;
             }
-            Peer peer = role == "host" ? (Peer)new HostPeer(port, label) : new GuestPeer(port, label);
-            return peer.Run();
+            try
+            {
+                Peer peer;
+                if (role == "host") peer = expectUnauthorized ? (Peer)new RefusingHostPeer(port, label, endpoint) : new HostPeer(port, label, endpoint);
+                else peer = wrongToken ? (Peer)new WrongTokenGuestPeer(label, endpoint) : new GuestPeer(port, label, endpoint);
+                return peer.Run();
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine("FAILED: " + e.GetType().Name + ": " + e.Message);
+                return 1;
+            }
         }
     }
 
@@ -183,18 +206,32 @@ namespace Patodois.RewriteLink.InteropPeer
         protected readonly List<string> Focus = new List<string>();
         protected string LostReason;
         protected string Stats = "null";
+        protected readonly string Mode;                                   // "plain", "token" or "wrong-token"
+        protected bool Connected;                                         // a Connected event was seen
+        protected readonly List<string> HandshakeFailedReasons = new List<string>();
 
-        protected Peer(bool host, int port, string label)
+        /// <param name="mode">plain, token (the host's library makes the token and the endpoint file) or wrong-token (the refusal scenario).</param>
+        /// <param name="tweak">Sets the revision 6 fields of the link configuration; null in plain mode.</param>
+        protected Peer(bool host, int port, string label, string mode, Action<LinkConfig> tweak)
         {
             RoleName = host ? "host" : "guest";
             Label = label;
+            Mode = mode;
             var cfg = new LinkConfig("interop " + RoleName + " (" + label + ")")
             {
                 ControlPort = port, UdpPort = 0, HeartbeatMs = 100, TimeoutMs = 3000, ReconnectMs = 100,
             };
-            Log((host ? "listening on" : "connecting to") + " 127.0.0.1:" + port);
+            if (tweak != null) tweak(cfg);
+            Log((host ? "listening on" : "connecting to") + " 127.0.0.1:" + cfg.ControlPort + (cfg.EndpointFile != null ? " (endpoint file)" : "") + (mode == "wrong-token" ? " [" + mode + "]" : ""));
             Link = host ? Link.Host(cfg) : Link.Guest(cfg);
+            if (host) Log("bound control port " + Link.ControlPort);
         }
+
+        /// <summary>The ending of the session is not what the wrong-token scenario checks, and its result has no counters.</summary>
+        protected virtual bool ReportsStats { get { return true; } }
+
+        /// <summary>A handshake that fails is a failure of the peer, except in the refusal scenario.</summary>
+        protected virtual void OnHandshakeFailed(string reason) { Fail("handshake failed: " + reason); }
 
         protected long NowMs { get { return _clock.ElapsedMilliseconds; } }
 
@@ -263,7 +300,13 @@ namespace Patodois.RewriteLink.InteropPeer
                     Link.Poll(events);
                     foreach (LinkEvent e in events)
                     {
-                        if (e is LinkEvent.HandshakeFailed) Fail("handshake failed: " + ((LinkEvent.HandshakeFailed)e).Reason);
+                        if (e is LinkEvent.Connected) Connected = true;
+                        if (e is LinkEvent.HandshakeFailed)
+                        {
+                            string reason = ((LinkEvent.HandshakeFailed)e).Reason;
+                            HandshakeFailedReasons.Add(reason);
+                            OnHandshakeFailed(reason);
+                        }
                         else OnEvent(e);
                         if (Finished) break;
                     }
@@ -281,7 +324,7 @@ namespace Patodois.RewriteLink.InteropPeer
             }
             try
             {
-                if (Stats == "null") SnapshotStats(); // a run that ended early (a failure) never reached the end of the rounds
+                if (Stats == "null" && ReportsStats) SnapshotStats(); // a run that ended early (a failure) never reached the end of the rounds
                 Cleanup();
                 Link.Dispose();
             }
@@ -314,9 +357,10 @@ namespace Patodois.RewriteLink.InteropPeer
             b.Append("\"role\":").Append(Quote(RoleName)).Append(",\"label\":").Append(Quote(Label));
             b.Append(",\"ok\":").Append(_failures.Count == 0 ? "true" : "false");
             b.Append(",\"failures\":").Append(List(_failures.Select(Quote)));
-            b.Append(",\"peer_game\":").Append(Quote(PeerGame));
-            b.Append(",\"protocol\":").Append(Protocol.ToString(CultureInfo.InvariantCulture));
-            b.Append(",\"session\":").Append(SessionJson());
+            bool none = Mode == "wrong-token"; // no session ever started
+            b.Append(",\"peer_game\":").Append(none ? "null" : Quote(PeerGame));
+            b.Append(",\"protocol\":").Append(none ? "null" : Protocol.ToString(CultureInfo.InvariantCulture));
+            b.Append(",\"session\":").Append(none ? "null" : SessionJson());
             b.Append(",\"spawns\":").Append(List(Spawns.Select(x => x.ToString(CultureInfo.InvariantCulture))));
             b.Append(",\"despawns\":").Append(List(Despawns.Select(x => x.ToString(CultureInfo.InvariantCulture))));
             b.Append(",\"cameras\":").Append(Cameras).Append(",\"poses\":").Append(Poses);
@@ -324,6 +368,8 @@ namespace Patodois.RewriteLink.InteropPeer
             b.Append(",\"frames_ok\":").Append(FramesOk).Append(",\"frames_bad\":").Append(FramesBad);
             b.Append(",\"focus\":").Append(List(Focus.Select(Quote)));
             b.Append(",\"lost_reason\":").Append(LostReason == null ? "null" : Quote(LostReason));
+            b.Append(",\"mode\":").Append(Quote(Mode)).Append(",\"connected\":").Append(Connected ? "true" : "false");
+            b.Append(",\"handshake_failed\":").Append(List(HandshakeFailedReasons.Select(Quote)));
             b.Append(",\"stats\":").Append(Stats);
             return b.Append("}").ToString();
         }
@@ -341,7 +387,8 @@ namespace Patodois.RewriteLink.InteropPeer
         private uint _cameraSeq;
         private bool _gotPose, _gotFrame;
 
-        public HostPeer(int port, string label) : base(true, port, label) { }
+        public HostPeer(int port, string label, string endpoint)
+            : base(true, port, label, endpoint == null ? "plain" : "token", endpoint == null ? (Action<LinkConfig>)null : cfg => cfg.EndpointFile = endpoint) { }
 
         protected override void OnEvent(LinkEvent e)
         {
@@ -493,7 +540,8 @@ namespace Patodois.RewriteLink.InteropPeer
         private bool _hostSpawned;
         private long _closeAt = -1;
 
-        public GuestPeer(int port, string label) : base(false, port, label) { }
+        public GuestPeer(int port, string label, string endpoint)
+            : base(false, port, label, endpoint == null ? "plain" : "token", endpoint == null ? (Action<LinkConfig>)null : cfg => cfg.EndpointFile = endpoint) { }
 
         protected override void OnEvent(LinkEvent e)
         {
@@ -598,6 +646,96 @@ namespace Patodois.RewriteLink.InteropPeer
             if (Cameras != Data.N) Fail("cameras is " + Cameras + ", expected " + Data.N);
             if (Poses != Data.N) Fail("poses is " + Poses + ", expected " + Data.N);
             if (CollisionTriangles != Data.CollisionTriangleCount) Fail("collision_triangles is " + CollisionTriangles + ", expected " + Data.CollisionTriangleCount);
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------------------------------- the refusal scenario
+
+    /// <summary>The host of the wrong-token mode: it has a token and its endpoint file; it must refuse the guest and say so.</summary>
+    internal sealed class RefusingHostPeer : Peer
+    {
+        private long _closeAt = -1;
+
+        public RefusingHostPeer(int port, string label, string endpoint) : base(true, port, label, "wrong-token", cfg => cfg.EndpointFile = endpoint) { }
+
+        protected override bool ReportsStats { get { return false; } }
+
+        protected override void OnEvent(LinkEvent e)
+        {
+            if (e is LinkEvent.Connected) Fail("a session started with a guest that has the wrong token");
+            else Fail("unexpected " + e.Kind + " event");
+        }
+
+        protected override void OnHandshakeFailed(string reason)
+        {
+            if (reason.IndexOf("unauthorized", StringComparison.Ordinal) < 0) Fail("the reason of HandshakeFailed is \"" + reason + "\", expected it to contain unauthorized");
+            if (_closeAt < 0)
+            {
+                _closeAt = NowMs + 300; // keep polling a little: nothing may connect after the refusal
+                Phase("refused the guest: polling for 300 ms");
+            }
+        }
+
+        protected override void Tick()
+        {
+            if (_closeAt >= 0 && NowMs >= _closeAt) Finished = true;
+        }
+
+        protected override void Cleanup()
+        {
+            if (!Finished) return;
+            if (Connected) Fail("a Connected event came");
+            if (HandshakeFailedReasons.Count == 0) Fail("no HandshakeFailed event");
+        }
+    }
+
+    /// <summary>The guest of the wrong-token mode: it reads the endpoint file itself and sends the file's token with its last character changed.</summary>
+    internal sealed class WrongTokenGuestPeer : Peer
+    {
+        public WrongTokenGuestPeer(string label, string endpoint) : base(false, 0, label, "wrong-token", cfg => Spoil(cfg, endpoint)) { }
+
+        /// <summary>The library is not given the file: it gets the port, and the file's token with its last character replaced (0 by 1, anything else by 0).</summary>
+        private static void Spoil(LinkConfig cfg, string file)
+        {
+            EndpointInfo info = null;
+            long end = Environment.TickCount64 + 10000;
+            while (info == null)
+            {
+                try { info = Endpoint.Read(file); }
+                catch (EndpointException)
+                {
+                    if (Environment.TickCount64 > end) throw;
+                    Thread.Sleep(50);
+                }
+            }
+            string t = info.Token;
+            char last = t[t.Length - 1];
+            cfg.ControlPort = info.ControlPort;
+            cfg.Token = t.Substring(0, t.Length - 1) + (last == '0' ? '1' : '0');
+            cfg.EndpointFile = null;
+        }
+
+        protected override bool ReportsStats { get { return false; } }
+
+        protected override void OnEvent(LinkEvent e)
+        {
+            if (e is LinkEvent.Connected) Fail("a session started with the wrong token");
+            else Fail("unexpected " + e.Kind + " event");
+        }
+
+        protected override void OnHandshakeFailed(string reason)
+        {
+            if (reason.IndexOf("unauthorized", StringComparison.Ordinal) < 0) Fail("the reason of HandshakeFailed is \"" + reason + "\", expected it to contain unauthorized");
+            Finished = true; // close at once, before the library reconnects
+        }
+
+        protected override void Tick() { }
+
+        protected override void Cleanup()
+        {
+            if (!Finished) return;
+            if (Connected) Fail("a Connected event came");
+            if (HandshakeFailedReasons.Count == 0) Fail("no HandshakeFailed event");
         }
     }
 }

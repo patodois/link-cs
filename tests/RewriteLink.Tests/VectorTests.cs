@@ -31,7 +31,7 @@ namespace Patodois.RewriteLink.Tests
         /// the vectors: run scripts/sync-link-vectors.sh REPO_DIR in the rewrite-bridge repository (it copies the directory and prints
         /// "VECTORS_DIGEST = ..."), paste that value here, then run the tests and sort out the new or changed vectors.
         /// </summary>
-        private const string VectorsDigest = "815d4f09e6d15f17dfcfedcf96865c5cfd60e170d3f71fb97f3adc0edc200fd9";
+        private const string VectorsDigest = "1d64e93423f3be8b152260ad93c11f0c5459fa942be6912f3aeda13b3e66649f";
 
         /// <summary>Vectors this library fails, id -> why. Empty when it passes them all.</summary>
         private static readonly Dictionary<string, string> KnownDisagreements = new Dictionary<string, string>
@@ -49,6 +49,7 @@ namespace Patodois.RewriteLink.Tests
             Test("vectors: pixel files, readers (pixelfiles.json)", PixelReaderVectors);
             Test("vectors: pixel files, writers (pixelfiles.json)", PixelWriterVectors);
             Test("vectors: scripted sessions (sessions.json)", SessionVectors);
+            Test("vectors: endpoint files (endpoints.json)", EndpointVectors);
         }
 
         // ------------------------------------------------------------------------------------------ loading
@@ -198,6 +199,7 @@ namespace Patodois.RewriteLink.Tests
                     {
                         Role = role("role"), Game = s("game"), Protocol = u("protocol"), MinProtocol = u("min_protocol"), UdpPort = u("udp_port"),
                         HeartbeatMs = u("heartbeat_ms"), TimeoutMs = u("timeout_ms"), Session = m.ContainsKey("session") ? u("session") : (uint?)null,
+                        Token = m.ContainsKey("token") ? s("token") : null,
                     };
                 case "spawn": return new Control.Spawn(u("entity"), s("provider"), s("asset"), J.Str(m, "name", null));
                 case "despawn": return new Control.Despawn(u("entity"));
@@ -738,6 +740,73 @@ namespace Patodois.RewriteLink.Tests
             r.Finish("sessions.json");
         }
 
+        // ------------------------------------------------------------------------------------------ endpoints.json
+
+        /// <summary>The token of the endpoint vectors; no error text may contain it (README of the vectors).</summary>
+        private const string EndpointToken = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+        private static void EndpointVectors()
+        {
+            var r = new Report();
+            foreach (var c in Cases("endpoints.json"))
+            {
+                string res = Guard(() => CheckEndpoint(c));
+                if (res != null && res.StartsWith("skip:", StringComparison.Ordinal)) r.Skipped.Add(J.Str(c, "id", "?") + " (" + res.Substring(5) + ")");
+                else r.Record(c, res);
+            }
+            r.Finish("endpoints.json");
+        }
+
+        private static string CheckEndpoint(Dictionary<string, object> c)
+        {
+            bool windows = OperatingSystem.IsWindows();
+            if (c.ContainsKey("skip_on") && ((List<object>)c["skip_on"]).Contains("windows") && windows) return "skip:windows";
+            using (var t = new TempDir("ep"))
+            {
+                string path = t.At("endpoint.json");
+                switch (J.Str(c, "path_kind", null))
+                {
+                    case null:
+                    {
+                        byte[] bytes = c.ContainsKey("text_hex") ? Unhex(J.Str(c, "text_hex", null)) : new UTF8Encoding(false).GetBytes(J.Str(c, "text", null));
+                        File.WriteAllBytes(path, bytes);
+                        if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(path, (UnixFileMode)Convert.ToInt32(J.Str(c, "mode", "0600"), 8));
+                        break;
+                    }
+                    case "missing": path = t.At("does-not-exist.json"); break;
+                    case "directory": path = t.At("a-directory"); Directory.CreateDirectory(path); break;
+                    case "fifo":
+                        if (windows) return "skip:fifo";
+                        path = t.At("fifo.json");
+                        if (!MakeFifo(path)) return "skip:no mkfifo";
+                        break;
+                    default: throw new RunnerBug("path_kind " + J.Str(c, "path_kind", null));
+                }
+                // the reader must not block on a FIFO: give it a thread and a deadline
+                EndpointInfo got = null;
+                Exception err = null;
+                string p = path;
+                var th = new Thread(() => { try { got = Endpoint.Read(p); } catch (Exception e) { err = e; } }) { IsBackground = true };
+                th.Start();
+                if (!th.Join(5000)) return "the reader did not return within 5 seconds";
+                switch (J.Str(c, "expect", null))
+                {
+                    case "refused":
+                        if (got != null) return "accepted (control_port " + got.ControlPort + ")";
+                        if (!(err is EndpointException)) return "expected an EndpointException, got " + (err == null ? "nothing" : err.GetType().Name + ": " + err.Message);
+                        if (err.Message.Contains(EndpointToken)) return "the error text contains the token";
+                        return null;
+                    case "ok":
+                        if (err != null) return "refused: " + err.Message;
+                        if (got.ControlPort != (int)J.U32(c["control_port"])) return "control_port " + got.ControlPort + ", expected " + J.Write(c["control_port"]);
+                        if (got.Token != J.Str(c, "token", null)) return "the token differs (" + got.Token.Length + " chars)";
+                        if (got.Token.Length >= 16 && got.ToString().Contains(got.Token)) return "ToString shows the token";
+                        return null;
+                    default: throw new RunnerBug("expect " + J.Str(c, "expect", null));
+                }
+            }
+        }
+
         private sealed class Conn
         {
             public Socket Sock;
@@ -787,6 +856,7 @@ namespace Patodois.RewriteLink.Tests
                     port = ((IPEndPoint)_listener.LocalEndPoint).Port;
                 }
                 var lc = new LinkConfig("vector ut") { ControlPort = port, UdpPort = 0, HeartbeatMs = ms("heartbeat_ms", 250), TimeoutMs = ms("timeout_ms", 2000), ReconnectMs = ms("reconnect_ms", 200) };
+                if (cfg.ContainsKey("token")) lc.Token = J.Str(cfg, "token", null);
                 _ut = host ? Link.Host(lc) : Link.Guest(lc);
                 _vars["peer_udp_port"] = ((IPEndPoint)_udp.LocalEndPoint).Port.ToString(CultureInfo.InvariantCulture);
                 _vars["ut_udp_port"] = _ut.UdpPort.ToString(CultureInfo.InvariantCulture);

@@ -236,6 +236,11 @@ namespace Patodois.RewriteLink
         private ulong _lastFrame;
         private bool _closed;
 
+        // revision 6 (CONTRACT.md 6.2)
+        private byte[] _tokenBytes;     // host: the UTF-8 bytes of the token it requires (configured or generated), else null
+        private string _helloToken;     // guest: the token for the connection attempt in progress (the configured one, or the endpoint file's)
+        private bool _endpointWritten;  // host: this link wrote cfg.EndpointFile and deletes it when it closes
+
         // diagnostics
         public long DatagramsSent, DatagramsReceived, Malformed, Stale, Foreign, SendDropped, LinesSent, LinesReceived;
         /// <summary>Pose records for an entity the peer never spawned (or already despawned); not delivered.</summary>
@@ -249,6 +254,9 @@ namespace Patodois.RewriteLink
         {
             _role = role;
             _cfg = cfg;
+            Tokens.CheckConfigured(cfg.Token, "Token");
+            if (cfg.EndpointFile != null && cfg.EndpointFile.Length == 0) throw new ArgumentException("the endpoint file path is empty", "EndpointFile");
+            _helloToken = cfg.Token;
             _heartbeatMs = Math.Max(Wire.MinHeartbeatMs, Math.Min(Wire.MaxHeartbeatMs, cfg.HeartbeatMs));
             _nextTry = Now();
             Socket u = null, l = null;
@@ -288,7 +296,32 @@ namespace Patodois.RewriteLink
             int burst = Wire.CollisionPerPoll;
             try { burst = Math.Max(8, Math.Min(burst, u.ReceiveBufferSize / 12000)); } catch (SocketException) { }
             _collisionBurst = burst;
+            if (role == Role.Host)
+            {
+                // The token and the endpoint file come last, once the control port is bound: a host that failed to bind writes no file, so a guest
+                // that reads the file never hands the token to whoever holds the port (CONTRACT.md 6.2).
+                try
+                {
+                    string token = cfg.Token;
+                    if (token == null && cfg.EndpointFile != null) token = Tokens.Generate();
+                    if (token != null) _tokenBytes = Tokens.Bytes(token);
+                    if (cfg.EndpointFile != null)
+                    {
+                        Endpoint.Write(cfg.EndpointFile, _controlPort, token);
+                        _endpointWritten = true;
+                    }
+                }
+                catch
+                {
+                    u.Close();
+                    l.Close();
+                    throw;
+                }
+            }
         }
+
+        /// <summary>A new token for <see cref="LinkConfig.Token"/>: 32 bytes of the operating system's CSPRNG as 64 lowercase hex digits (see <see cref="Tokens.Generate"/>).</summary>
+        public static string GenerateToken() { return Tokens.Generate(); }
 
         /// <summary>Listens for one guest on 127.0.0.1:<c>cfg.ControlPort</c>.</summary>
         public static Link Host(LinkConfig cfg) { return new Link(Role.Host, cfg); }
@@ -341,6 +374,7 @@ namespace Patodois.RewriteLink
             {
                 Role = _role, Game = _cfg.Game ?? "", Protocol = protocol, MinProtocol = Wire.MinProtocolVersion, UdpPort = (uint)_udpPort,
                 HeartbeatMs = (uint)_heartbeatMs, TimeoutMs = (uint)Math.Min(_cfg.TimeoutMs, uint.MaxValue), Session = session,
+                Token = _role == Role.Guest ? _helloToken : null, // a host never sends one
             };
         }
 
@@ -373,12 +407,24 @@ namespace Patodois.RewriteLink
             }
             if (_state == State.Idle && now >= _nextTry)
             {
+                int port = _cfg.ControlPort;
+                _helloToken = _cfg.Token;
+                if (_cfg.EndpointFile != null)
+                {
+                    // Before every attempt, the first and each reconnect: the host may have restarted with another port and token. No file, no
+                    // attempt; try again after the reconnect delay (no event: the host is just not there yet).
+                    EndpointInfo ep;
+                    try { ep = Endpoint.Read(_cfg.EndpointFile); }
+                    catch (EndpointException) { _nextTry = now + _cfg.ReconnectMs; return; }
+                    port = ep.ControlPort;
+                    _helloToken = ep.Token;
+                }
                 Socket s = null;
                 try
                 {
                     s = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
                     s.Blocking = false;
-                    try { s.Connect(new IPEndPoint(IPAddress.Loopback, _cfg.ControlPort)); }
+                    try { s.Connect(new IPEndPoint(IPAddress.Loopback, port)); }
                     catch (SocketException e) { if (!WouldBlock(e)) throw; }
                     _connecting = s;
                     _state = State.Connecting;
@@ -527,6 +573,9 @@ namespace Patodois.RewriteLink
         /// <summary>Returns null on success, else the reason the handshake failed.</summary>
         private string OnHello(Control.Hello h, long now)
         {
+            // A host with a token looks at it first, before the role, the versions or any range, and answers with this one word (CONTRACT.md 6.2):
+            // a peer that did not show the token learns nothing else about the host.
+            if (_role == Role.Host && _tokenBytes != null && !TokenMatches(h.Token)) return "unauthorized";
             if (h.Role != Control.Other(_role)) return "peer claims role " + Control.RoleName(h.Role);
             if (h.UdpPort == 0) return "peer announced udp_port 0";
             if (h.HeartbeatMs < Wire.MinHeartbeatMs || h.HeartbeatMs > Wire.MaxHeartbeatMs)
@@ -572,6 +621,15 @@ namespace Patodois.RewriteLink
             _events.Add(new LinkEvent.Connected(_peer));
             SendHeartbeat();
             return null;
+        }
+
+        private bool TokenMatches(string shown)
+        {
+            if (shown == null) return false;
+            byte[] got = Control.Utf8.GetBytes(shown); // all of it: a token that starts with ours but is longer must not be cut down to ours
+            bool inRange = got.Length >= 1 && got.Length <= Tokens.MaxBytes;
+            bool equal = Tokens.Equal(got, _tokenBytes);
+            return inRange & equal;
         }
 
         private void ResetSession()
@@ -907,6 +965,7 @@ namespace Patodois.RewriteLink
             lock (_gate)
             {
                 if (_closed) return;
+                if (_endpointWritten) { Endpoint.Delete(_cfg.EndpointFile); _endpointWritten = false; }
                 long now = Now();
                 if (_state == State.Connecting && _connecting != null) { try { _connecting.Close(); } catch (SocketException) { } }
                 if ((_state == State.Handshake || _state == State.Live) && _ctl != null) Retire(_ctl, "closing", now);

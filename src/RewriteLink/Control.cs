@@ -23,6 +23,10 @@ namespace Patodois.RewriteLink
             public string Game;
             public uint Protocol, MinProtocol, UdpPort, HeartbeatMs, TimeoutMs;
             public uint? Session;
+            /// <summary>Revision 6: the host's token, sent by a guest only (CONTRACT.md 6.2); null = no field. A secret: <see cref="ToString"/> hides it.</summary>
+            public string Token;
+
+            public override string ToString() { return "hello " + RoleName(Role) + " " + Json.Quote(Game ?? "") + (Token != null ? " token=<redacted>" : ""); }
 
             public override string ToLine()
             {
@@ -33,6 +37,7 @@ namespace Patodois.RewriteLink
                  .Append(",\"udp_port\":").Append(UdpPort).Append(",\"heartbeat_ms\":").Append(HeartbeatMs)
                  .Append(",\"timeout_ms\":").Append(TimeoutMs);
                 if (Session.HasValue) b.Append(",\"session\":").Append(Session.Value);
+                if (Token != null) b.Append(",\"token\":").Append(Json.Quote(Token));
                 return b.Append("}\n").ToString();
             }
         }
@@ -131,6 +136,8 @@ namespace Patodois.RewriteLink
                     };
                     object s;
                     if (o.TryGetValue("session", out s) && s != null) h.Session = Int(o, "session", uint.MaxValue);
+                    // any string parses, whatever its length; a host with a token judges it (CONTRACT.md 6.2, 8)
+                    h.Token = OptStr(o, "token");
                     return h;
                 }
                 case "spawn":

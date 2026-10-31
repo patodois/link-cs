@@ -1,6 +1,6 @@
 # link-cs
 
-A **C#** implementation of the **rewrite-bridge passthrough link protocol v1** (contract revision 5), so that a
+A **C#** implementation of the **rewrite-bridge passthrough link protocol v1** (contract revision 6), so that a
 game mod written for .NET or Unity (BepInEx, MelonLoader, a Valheim or Unturned mod ...) can be a **host** or a
 **guest** next to any other game or rewrite that speaks it. The protocol is defined by `docs/CONTRACT.md` in the
 rewrite-bridge repository; this library is one implementation of it, next to the Rust crate,
@@ -62,12 +62,14 @@ guest.Close();
 
 | | |
 |---|---|
-| `Link.Host(cfg)`, `Link.Guest(cfg)` | Create one side. `LinkConfig` has `Game`, `ControlPort` (47800), `UdpPort`, `HeartbeatMs` (250, clamped to 10..10000), `TimeoutMs` (2000), `ReconnectMs`, `MaxCollisionTriangles`. |
+| `Link.Host(cfg)`, `Link.Guest(cfg)` | Create one side. `LinkConfig` has `Game`, `ControlPort` (47800), `UdpPort`, `HeartbeatMs` (250, clamped to 10..10000), `TimeoutMs` (2000), `ReconnectMs`, `MaxCollisionTriangles`, and, from revision 6, `Token` and `EndpointFile` (below). |
 | `Poll()`, `Poll(List<LinkEvent>)` | **Never blocks.** Handshake, reads both channels, heartbeats, at most 32 collision chunks, the watchdog. The second form appends to your list, so a frame loop allocates no list. |
 | `SendCamera`, `SendPoses`, `SendCollision`, `SendFrame` | State datagrams. `SendCollision` takes 9 floats per triangle, copies them and queues the chunks (paced; a newer snapshot replaces the queued one); more than `Wire.MaxCollisionChunks` (4096) chunks, 925696 triangles, throws `ArgumentException` before anything is copied. `SendCamera` returns the `seq` a guest quotes in `FrameReady.CameraSeq`. |
 | `Spawn`, `Despawn`, `SetFocus`, `AnnounceFrames` | Control messages. |
 | `Disconnect(reason)`, `Close()` / `Dispose()` | `bye`, half-close, drain (CONTRACT 6.1). `Disconnect` does not block; `Close` may block for up to about 250 ms. |
 | `IsConnected`, `Peer`, `Focus`, `ControlPort`, `UdpPort`, `Malformed`, `Stale`, `Foreign`, `UnknownEntity`, `SpawnIgnored`, `SendDropped`, `DatagramsSent/Received`, `LinesSent/Received` | State and statistics. |
+| `Tokens.Generate()` / `Link.GenerateToken()`, `Tokens.Equal(byte[], byte[])` | Revision 6: a new token (32 bytes of the OS CSPRNG as 64 lowercase hex digits), and the contract's constant-time comparison. |
+| `Endpoint.Write(path, controlPort, token)`, `Endpoint.Read(path)` (an `EndpointInfo` with `ControlPort` and `Token`), `Endpoint.Delete(path)` | Revision 6: the endpoint file as a launcher or a test would use it. `Write` and `Read` throw `EndpointException` (the message never contains the token or the file's contents). |
 | `PixelFile.Writer`, `PixelFile.Reader` | The pixel file with the seqlock, colour and the optional linear depth plane. Read a `Frame` datagram with `reader.Read(frameReady, wantDepth)`, which checks its width and height against the file and the slot header. |
 | `Wire`, `Control`, `Quat` | The codecs and small helpers in the link's conventions (right-handed, +Y up, +Z front). |
 
@@ -75,9 +77,43 @@ Events are `LinkEvent.Connected`, `Lost`, `HandshakeFailed`, `Camera`, `Poses`, 
 `Focus`, `FrameChannel`. Every public method takes the link's lock, so a game thread can send while a helper thread polls.
 Sending without a session throws `NotConnectedException`; a value the contract forbids throws `WireException`.
 
+## Authentication: the token and the endpoint file (contract revision 6, version 0.2.0)
+
+A host may require a token, and hand it to the guest through a file that only the user can read. Both are off by default, and a host without a
+token behaves exactly as in revision 5.
+
+```csharp
+// host: a token is made, the file is written after the control port is bound, and deleted by Close()
+var host = Link.Host(new LinkConfig("My Game") { ControlPort = 0, EndpointFile = path });
+// guest: before every connection attempt it reads the file and uses its port and token (no file: no attempt, it tries again after ReconnectMs)
+var guest = Link.Guest(new LinkConfig("My Rewrite") { EndpointFile = path });
+```
+
+- `LinkConfig.Token`: for a host the token it requires, for a guest the one it sends in its `hello` (`"token"`). 1 to 256 bytes of UTF-8 (bytes, not
+  characters), no U+0000, otherwise `Link.Host` and `Link.Guest` throw `ArgumentException` (the message never shows the token). A host with `EndpointFile`
+  and no `Token` makes one with `Tokens.Generate()` and requires it.
+- A host with a token checks it before anything else in the guest's `hello`, in constant time, and answers a missing, empty, too long or different one with
+  `{"type":"bye","reason":"unauthorized"}` (and a `HandshakeFailed` event with the reason `unauthorized`), nothing more. A guest sees the same word in its
+  `HandshakeFailed` reason and reads the file again before it retries. A host without a token ignores the field.
+- `LinkConfig.EndpointFile`: a host writes `{"control_port":N,"token":"..."}` there after `Bind`, atomically and owner-only from the moment the data
+  exists, and deletes it in `Close()`; if the file cannot be written, creating the host throws `EndpointException` and the port is closed. A reader refuses
+  anything but a regular file of at most 4096 bytes with a valid `control_port` and `token`, and on Unix a file whose mode grants anything to the group or others.
+- Nothing prints a token: not `LinkConfig.ToString()`, `EndpointInfo.ToString()` or `Control.Hello.ToString()`, not an exception message, an event reason or a `bye`.
+- What it protects against and what it does not (other users and processes that cannot read the file: yes; a squatter on the control port: yes, because the file is
+  written only after the bind; processes of the same user and administrators: no; encryption: none) is in section 6.2 of the contract.
+
+How the file is written on `netstandard2.0`: on Unix a directory with mode 0700 is made next to the target, the temporary file is created in it, set to 0600 before the
+first byte is written, renamed over the target, and the directory is removed. On .NET 7+ the runtime's own calls do this (found by reflection); on Mono, Unity and the like,
+libc's `mkdir`, `chmod` and `rename` (not the variadic `open`, which cannot be called through P/Invoke on Apple arm64). The tests run both paths. On Windows the file is
+created with `FileMode.CreateNew` beside the target and moved over it (`File.Replace`, or `File.Move` if the target is new, with a tiny window in between): the per-user ACL of
+the directory (`%LOCALAPPDATA%`) is what keeps others out. The Windows path has not been run.
+
+The reader's permission check (`mode & 077`) uses `File.GetUnixFileMode`, which exists from .NET 7: on older runtimes (Mono, Unity, .NET Framework) it is **skipped**. Like the pixel
+reader, it tells a FIFO or device from a regular file by its size 0 before opening (a peer that swaps the file after the check can still get through).
+
 ## Contract revision 5 (and 4)
 
-Revision 5 keeps wire compatibility with revision 4 (protocol v1) and only makes the validation stricter; version 0.1.2 of the library follows it:
+Revision 5 keeps wire compatibility with revision 4 (protocol v1) and only makes the validation stricter; version 0.1.2 of the library followed it:
 
 - a `\u0000` escape is an error in any string or key of a control line, wherever in the line it is (an unknown field, a nested value, a value
   that a later duplicate key overrides); a string handed to the control writer (`game`, `provider`, `asset`, `name`, a reason, a path) has
@@ -149,12 +185,13 @@ The tests are the C# port of link-java's and link-c's: the worked example of CON
 malformed datagrams (20000 random buffers, every prefix of every valid one, 20000 mutations: only `WireException` may come out) and of
 100000 mutated control lines, 30000 junk datagrams at a live host, the JSON corpus, live sessions over loopback, every revision 4 and 5 case, and
 the seqlock under contention (a writer thread lapping a two-slot file against a reader thread; the same copy without the lock check does
-tear, and the seqlock reader accepts no torn frame), and the shared test vectors (see below).
+tear, and the seqlock reader accepts no torn frame), the revision 6 token and endpoint file (constant-time comparison, generation, writing and reading with
+both the runtime's calls and libc's, a live host and guest through an endpoint file, a restarted host, secrecy), and the shared test vectors (see below).
 
 ## Shared test vectors
 
-`tests/vectors/link/` holds the shared test vectors of the link protocol: control lines, datagrams, pixel files and scripted sessions
-over real sockets, each with the section of CONTRACT.md it comes from. They are derived from the contract alone and every implementation
+`tests/vectors/link/` holds the shared test vectors of the link protocol: control lines, datagrams, pixel files, scripted sessions
+over real sockets and endpoint files, each with the section of CONTRACT.md it comes from. They are derived from the contract alone and every implementation
 (Rust, Java, C and this one) runs the same files; `tests/vectors/link/README.md` describes the formats and `GAPS.md` what the contract
 leaves open. The directory is a **copy** of `tests/vectors/link` in the rewrite-bridge repository, without its generator, pinned by digest:
 `tests/RewriteLink.Tests/VectorTests.cs` checks every file against `SHA256SUMS`, that no other file is there, and that the SHA-256 of
@@ -182,7 +219,8 @@ dotnet tests/RewriteLink.InteropPeer/bin/Release/net8.0/InteropPeer.dll host  --
 dotnet tests/RewriteLink.InteropPeer/bin/Release/net8.0/InteropPeer.dll guest --port 47810 --label cs
 ```
 
-(start the host first; the guest retries until a host answers). The last stdout line is `RBL-INTEROP-RESULT {json}`, the exit status is 0
+(start the host first; the guest retries until a host answers). With `--endpoint FILE` (revision 6) the host runs with `--port 0`, generates a token and writes `FILE`, and the
+guest gives its library `FILE` instead of a port; `--expect-unauthorized` (host) and `--wrong-token` (guest) run the refusal scenario. The last stdout line is `RBL-INTEROP-RESULT {json}`, the exit status is 0
 if every check passed. For the rewrite-bridge driver, set `RBL_PEER_CS="dotnet <path>/InteropPeer.dll"`.
 
 `tests/interop.sh` runs the demo against itself and against the Rust `fake_host` / `fake_guest`, link-java's `LinkDemo` and link-c's `demo`,
@@ -193,5 +231,5 @@ in both roles, each pair twice: with the guest rendering a 320x240 frame with a 
 
 - Developed and tested on macOS (arm64, .NET 8). The CI workflow also builds and runs the tests on Linux and Windows; this repository
   has not been pushed from here, so those runs have not happened yet, and the Windows paths (Winsock behaviour of non-blocking connect,
-  file sharing of the pixel file) are unverified.
+  file sharing of the pixel file, the endpoint file's `File.Replace`/`File.Move` and its per-user ACL) are unverified.
 - Strings are UTF-16 in memory and UTF-8 on the wire; text that is not valid UTF-16 is sent with U+FFFD.
