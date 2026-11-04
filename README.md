@@ -231,7 +231,6 @@ in both roles, each pair twice: with the guest rendering a 320x240 frame with a 
 
 ## Notes and limits
 
-- Developed and tested on macOS (arm64, .NET 8). The CI workflow also builds and runs the tests on Linux and Windows; this repository
-  has not been pushed from here, so those runs have not happened yet, and the Windows paths (Winsock behaviour of non-blocking connect,
+- Developed and tested on macOS (arm64, .NET 8). The CI workflow also builds and runs the tests on Linux and Windows; its results are not recorded here, and the Windows paths (Winsock behaviour of non-blocking connect,
   file sharing of the pixel file, the endpoint file's `File.Replace`/`File.Move` and its per-user ACL) are unverified.
 - Strings are UTF-16 in memory and UTF-8 on the wire; text that is not valid UTF-16 is sent with U+FFFD.
