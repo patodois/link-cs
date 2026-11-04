@@ -7,6 +7,8 @@ rewrite-bridge repository; this library is one implementation of it, next to the
 [link-java](https://github.com/patodois/link-java) and [link-c](https://github.com/patodois/link-c), and they talk to
 each other (see "Interop"). The API has the shape of link-java's `Link`.
 
+**Adding this to a game.** Read the [guide to adding a game](https://github.com/patodois/rewrite-bridge/blob/main/docs/INTEGRATING.md) first: it says whether to build a host or a guest, and has a host loop and a guest loop built against this library and run against rewrite-bridge's `fake_host` and `fake_guest`. Build the DLL with `dotnet build RewriteLink.sln -c Release` and reference it; there is no NuGet package. Not run inside BepInEx or MelonLoader.
+
 - `netstandard2.0`, so it loads in .NET Framework 4.6.1 and later, Mono, .NET and Unity's .NET Standard 2.0 profile.
   C# 7.3 language level, **no dependencies beyond the BCL**: sockets, `MemoryMappedFile`, `Volatile`, `Thread.MemoryBarrier`.
 - Everything binds and connects to `127.0.0.1` only. No threads are created: you call `Poll()`.
