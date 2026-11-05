@@ -300,6 +300,7 @@ namespace Patodois.RewriteLink
 
             internal Func<SafeFileHandle, IntPtr, UIntPtr, long, IntPtr> NativeReadOverride;
             internal Action<long> BeforeCopy;
+            private byte[] _planeScratch = new byte[0];
 
             private bool ManagedCopyAt(long offset, byte* dst, int count)
             {
@@ -348,9 +349,77 @@ namespace Patodois.RewriteLink
                 }
                 catch (Exception) { return false; } // I/O/provider/handle failures are misses.
             }
+            [StructLayout(LayoutKind.Sequential)]
+            private struct IoVector { internal IntPtr Base; internal UIntPtr Length; }
+            [DllImport("libc",EntryPoint="preadv",SetLastError=true)]
+            private static extern IntPtr PReadV(SafeFileHandle file,IoVector* vectors,int count,long offset);
+            private byte[] _paddingScratch=new byte[0];
+            private bool _vectorsUnavailable;
+
+            private bool? VectorRows(long offset,long stride,int row,int height,byte* dst)
+            {
+                try
+                {
+                    int gap=(int)stride-row;
+                    if(_paddingScratch.Length<gap) _paddingScratch=new byte[gap];
+                    IoVector* vectors=stackalloc IoVector[16];
+                    fixed(byte* padding=_paddingScratch)
+                    for(int start=0;start<height;start+=8)
+                    {
+                        int rows=Math.Min(8,height-start),count=rows*2-1,first=0;
+                        for(int y=0;y<rows;y++)
+                        {
+                            vectors[y*2].Base=(IntPtr)(dst+(start+y)*row);vectors[y*2].Length=(UIntPtr)(uint)row;
+                            vectors[y*2+1].Base=(IntPtr)padding;vectors[y*2+1].Length=(UIntPtr)(uint)gap;
+                        }
+                        long at=offset+start*stride;
+                        BeforeCopy?.Invoke(at);
+                        while(first<count)
+                        {
+                            long n;
+                            try {n=PReadV(_readHandle,vectors+first,count-first,at).ToInt64();}
+                            catch(Exception e) when(e is DllNotFoundException || e is EntryPointNotFoundException || e is BadImageFormatException || e is PlatformNotSupportedException || e is MarshalDirectiveException || e is TypeInitializationException)
+                            { _vectorsUnavailable=true;return null; }
+                            if(n<0 && Marshal.GetLastWin32Error()==4) continue;
+                            if(n<=0) return false;
+                            at+=n;
+                            while(first<count && (ulong)n>=vectors[first].Length.ToUInt64()) {n-=(long)vectors[first].Length.ToUInt64();first++;}
+                            if(first<count && n>0) {vectors[first].Base=(IntPtr)((byte*)vectors[first].Base+n);vectors[first].Length=(UIntPtr)(vectors[first].Length.ToUInt64()-(ulong)n);}
+                        }
+                    }
+                    return true;
+                }
+                catch(Exception) {return false;}
+            }
+
             private bool CopyRows(long offset, long stride, int row, int height, byte* dst)
             {
                 if (stride == row) return CopyAt(offset, dst, row * height);
+                // Group only bounded strides: extra padding dominates wide-file benchmarks.
+                if (stride <= 16 * 1024 && !_nativeUnavailable && !_vectorsUnavailable && height>1 && (height-1)*stride+row <= (long)row*height*4)
+                {
+                    bool? result=VectorRows(offset,stride,row,height,dst);
+                    if(result.HasValue) {if(!result.Value) _gone=true;return result.Value;}
+                }
+                int span = checked((int)((height - 1) * stride + row));
+                int blockBytes = Math.Max(32 << 10, row);
+                int blockRows = Math.Min(height, (int)((blockBytes - row) / stride + 1));
+                if (stride <= 16 * 1024 && span <= (long)row * height * 4 && blockRows > 1)
+                {
+                    int capacity = checked((int)((blockRows - 1) * stride + row));
+                    if (_planeScratch.Length < capacity) _planeScratch = new byte[capacity];
+                    fixed (byte* p = _planeScratch)
+                    {
+                        for (int start = 0; start < height; start += blockRows)
+                        {
+                            int rows = Math.Min(blockRows, height - start);
+                            int bytes = checked((int)((rows - 1) * stride + row));
+                            if (!CopyAt(offset + start * stride, p, bytes)) return false;
+                            for (int y = 0; y < rows; y++) Buffer.MemoryCopy(p + y * stride, dst + (start + y) * row, row, row);
+                        }
+                    }
+                    return true;
+                }
                 for (int y = 0; y < height; y++) if (!CopyAt(offset + y * stride, dst + y * row, row)) return false;
                 return true;
             }

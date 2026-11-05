@@ -103,6 +103,21 @@ namespace Patodois.RewriteLink.Tests
                     }
                 }
             });
+            T.Test("cropped planes use bounded reusable spans", () =>
+            {
+                if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) return;
+                using(var w=PixelFile.Writer.CreateTemp("gather",16,8,1,true))
+                {
+                    var colour=new byte[128]; Array.Fill(colour,(byte)7); var depth=new float[32]; Array.Fill(depth,2f);
+                    w.Write(colour,depth,8,4,0,1);
+                    using(var r=PixelFile.Reader.Open(w.Path))
+                    {
+                        int calls=0;r.BeforeCopy=_=>calls++;
+                        var f=r.Read(new Wire.FrameReady(1,0,0,8,4),true);
+                        T.Check(f!=null && f.Rgba[127]==7 && f.Depth[31]==2f && calls==4,"header, two spans and final identity");
+                    }
+                }
+            });
             T.Test("two files have independent presentation order and optional depth", () =>
             {
                 using(var a=PixelFile.Writer.CreateTemp("two-a",2,2,3,false))
@@ -144,13 +159,14 @@ namespace Patodois.RewriteLink.Tests
         }
         internal static int Bench()
         {
-            int[,] sizes = { {1280,720}, {1920,1080}, {3840,2160}, {8192,8192}, {16384,1}, {16384,4096} };
+            int[,] sizes = { {1280,720,1280,720}, {1920,1080,1920,1080}, {3840,2160,3840,2160}, {8192,8192,8192,8192}, {16384,1,16384,1}, {16384,4096,16384,4096}, {1920,1080,1280,720}, {3840,2160,1920,1080}, {16384,4096,8192,4096}, {16384,4096,1,4096} };
             for (int i = 0; i < sizes.GetLength(0); i++) for (int dep = 0; dep < 2; dep++)
             {
-                int width = sizes[i,0], height = sizes[i,1], pixels = width * height, n = pixels > 10000000 ? 5 : 30;
+                int fw = sizes[i,0], fh = sizes[i,1], width = sizes[i,2], height = sizes[i,3], pixels = width * height, n = pixels > 10000000 ? 5 : 30;
+                if (Environment.GetEnvironmentVariable("RBL_BENCH_CROPPED_ONLY") != null && width==fw) continue;
                 var px = new byte[pixels * 4]; Array.Fill(px, (byte)7);
                 float[] depth = dep != 0 ? new float[pixels] : null; if (depth != null) Array.Fill(depth, 2f);
-                using (var w = PixelFile.Writer.CreateTemp("bench", width, height, 1, dep != 0))
+                using (var w = PixelFile.Writer.CreateTemp("bench", fw, fh, 1, dep != 0))
                 {
                     w.Write(px, depth, width, height, 0, 1);
                     using (var r = PixelFile.Reader.Open(w.Path))
@@ -168,7 +184,7 @@ namespace Patodois.RewriteLink.Tests
                             if (j >= 2) times[j-2] = ms;
                         }
                         Array.Sort(times);
-                        Console.WriteLine("cs," + width + "," + height + "," + (dep != 0 ? "true" : "false") + "," + n + "," + times[n/2].ToString("F6", System.Globalization.CultureInfo.InvariantCulture) + "," + times[n*95/100].ToString("F6", System.Globalization.CultureInfo.InvariantCulture));
+                        Console.WriteLine("cs," + fw + "," + fh + "," + width + "," + height + "," + (dep != 0 ? "true" : "false") + "," + n + "," + times[n/10].ToString("F6", System.Globalization.CultureInfo.InvariantCulture) + "," + times[n/2].ToString("F6", System.Globalization.CultureInfo.InvariantCulture) + "," + times[n*95/100].ToString("F6", System.Globalization.CultureInfo.InvariantCulture));
                     }
                 }
             }
