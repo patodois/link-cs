@@ -2,3 +2,6 @@ bin/
 obj/
 *.user
 .vs/
+
+# Isolated dependencies for workflow regression tests.
+.workflow-tests/
