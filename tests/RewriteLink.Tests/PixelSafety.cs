@@ -90,6 +90,30 @@ namespace Patodois.RewriteLink.Tests
                     }
                 }
             });
+            T.Test("unsupported 32-bit pixel APIs fail before native calls", () =>
+            {
+                using(var w=PixelFile.Writer.CreateTemp("pointer-size",2,2,1,false))
+                {
+                    PixelFile.ProcessPointerSize=4;
+                    try {T.Throws<PlatformNotSupportedException>(()=>{using(var r=PixelFile.Reader.Open(w.Path)){}},"64-bit pixel requirement");}
+                    finally {PixelFile.ProcessPointerSize=IntPtr.Size;}
+                }
+            });
+            T.Test("frame allocation failures are misses without advancing order", () =>
+            {
+                using(var w=PixelFile.Writer.CreateTemp("allocation",2,2,1,false))
+                {
+                    w.Write(new byte[16],null,2,2,0,1);
+                    using(var r=PixelFile.Reader.Open(w.Path))
+                    {
+                        r.BeforeFrameAllocation=()=>{throw new OutOfMemoryException("injected");};
+                        var ready=new Wire.FrameReady(1,0,0,2,2);
+                        T.Check(r.ReadLatest(ready,false)==null && !r.IsGone && r.SkippedAllocation==1,"allocation miss keeps a healthy reader");
+                        r.BeforeFrameAllocation=null;
+                        T.Check(r.ReadLatest(ready,false)!=null,"same frame remains eligible after allocation recovery");
+                    }
+                }
+            });
             T.Test("short vector reads resume inside each iovec", () =>
             {
                 if(RuntimeInformation.IsOSPlatform(OSPlatform.Windows))return;

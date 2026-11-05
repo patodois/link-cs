@@ -67,9 +67,11 @@ namespace Patodois.RewriteLink
             public long DepthStride, DepthOffset;
         }
 
+        internal static int ProcessPointerSize = IntPtr.Size;
 
         private static void RequireLittleEndian()
         {
+            if (ProcessPointerSize != 8) throw new PlatformNotSupportedException("pixel files require a 64-bit process");
             if (!BitConverter.IsLittleEndian) throw new PlatformNotSupportedException("the pixel file code needs a little-endian machine");
         }
 
@@ -301,6 +303,8 @@ namespace Patodois.RewriteLink
 
             internal Func<SafeFileHandle, IntPtr, UIntPtr, long, IntPtr> NativeReadOverride;
             internal Action<long> BeforeCopy;
+            internal Action BeforeFrameAllocation;
+            public long SkippedAllocation;
             private byte[] _planeScratch = new byte[0];
 
             private bool ManagedCopyAt(long offset, byte* dst, int count)
@@ -437,6 +441,7 @@ namespace Patodois.RewriteLink
                 if (f != frame) { SkippedOtherFrame++; return null; }
                 if (w < 1 || h < 1 || w > _l.Width || h > _l.Height || (haveSize && (w != dw || h != dh))) { SkippedWrongSize++; return null; }
                 int row = (int)w * 4;
+                BeforeFrameAllocation?.Invoke();
                 var rgba = new byte[row * (int)h];
                 fixed (byte* p = rgba) if (!CopyRows(at + SlotHeaderLen, _l.Stride, row, (int)h, p)) { SkippedGone++; return null; }
                 float[] depth = null;
@@ -453,6 +458,12 @@ namespace Patodois.RewriteLink
 
             private Frame ReadSlot(ulong frame, int slot, bool haveSize, uint dw, uint dh, bool wantDepth)
             {
+                try { return ReadSlotInner(frame,slot,haveSize,dw,dh,wantDepth); }
+                catch (OutOfMemoryException) { SkippedAllocation++; return null; }
+            }
+
+            private Frame ReadSlotInner(ulong frame, int slot, bool haveSize, uint dw, uint dh, bool wantDepth)
+            {
                 if (_disposed || slot < 0 || slot >= _l.Slots) return null;
                 if (frame == 0) { SkippedOtherFrame++; return null; } // never delivered (CONTRACT.md 9.6, reader step 0)
                 if (IsGone) { _gone = true; SkippedGone++; return null; }
@@ -466,6 +477,7 @@ namespace Patodois.RewriteLink
                 if (f != frame) { SkippedOtherFrame++; return null; }
                 // step 2: the slot header's size must be 1 to the file's, and the datagram's, before anything is copied
                 if (w < 1 || h < 1 || w > (uint)_l.Width || h > (uint)_l.Height || (haveSize && (w != dw || h != dh))) { SkippedWrongSize++; return null; }
+                BeforeFrameAllocation?.Invoke();
                 var rgba = new byte[(int)w * (int)h * 4];
                 int row = (int)w * 4;
                 fixed (byte* dst = rgba)
