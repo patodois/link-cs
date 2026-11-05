@@ -10,10 +10,11 @@ using Microsoft.Win32.SafeHandles;
 namespace Patodois.RewriteLink
 {
     /// <summary>
-    /// The shared-memory pixel file of CONTRACT.md section 9.6 (revision 5): a <see cref="Reader"/> for the receiving side (maps the file
-    /// read-only, checks it, copies a slot with the seqlock) and a <see cref="Writer"/> for the sending side.
+    /// The shared-memory pixel file of CONTRACT.md section 9.6 (revision 7): a <see cref="Reader"/> for the receiving side (bounded Unix I/O
+    /// or a Windows read-only map, checking the slot before presentation) and a <see cref="Writer"/> for the sending side.
     ///
-    /// THE SEQLOCK AND THE .NET MEMORY MODEL. The writer makes a slot's 64-bit <c>lock</c> odd while it writes and even afterwards; the
+    /// Unix positional observations are not atomic acquire loads from the writer. See PIXEL-IO.md for the revision 7 limits.
+    /// THE SEQLOCK AND THE .NET MEMORY MODEL (writers and Windows mapped readers). The writer makes a slot's 64-bit <c>lock</c> odd while it writes and even afterwards; the
     /// reader copies and checks that the lock did not change. The contract asks for these orderings:
     ///
     ///   writer: lock+1 (relaxed); release fence; slot header, pixels, depth; lock+2 (release store)
@@ -143,6 +144,10 @@ namespace Patodois.RewriteLink
         public sealed class Reader : IDisposable
         {
             private readonly FileStream _file;
+            private SafeFileHandle _readHandle;
+            private bool _nativeUnavailable;
+            private bool _gone;
+            private byte[] _fallbackScratch = new byte[0];
             private readonly MemoryMappedFile _mmf;
             private readonly MemoryMappedViewAccessor _view;
             private readonly byte* _base;
@@ -159,11 +164,16 @@ namespace Patodois.RewriteLink
             public bool HasDepth { get { return _l.DepthFormat == DepthLinearF32; } }
 
             // Diagnostics: why Read returned null.
-            public long SkippedBusy, SkippedOtherFrame, SkippedOverwritten, SkippedGone, SkippedWrongSize;
+            public long SkippedBusy, SkippedOtherFrame, SkippedOverwritten, SkippedGone, SkippedWrongSize, SkippedStale;
 
             private Reader(FileStream file, MemoryMappedFile mmf, MemoryMappedViewAccessor view, byte* b, long mapped, Layout l)
             {
                 _file = file; _mmf = mmf; _view = view; _base = b; _mapped = mapped; _l = l;
+                if (!IsWindows)
+                {
+                    try { _readHandle = file.SafeFileHandle; }
+                    catch (Exception) { _nativeUnavailable = true; }
+                }
             }
 
             /// <summary>
@@ -175,7 +185,7 @@ namespace Patodois.RewriteLink
             {
                 get
                 {
-                    if (_disposed) return true;
+                    if (_disposed || _gone) return true;
                     try { return _file.Length < _mapped; }
                     catch (IOException) { return true; }
                     catch (ObjectDisposedException) { return true; }
@@ -244,7 +254,7 @@ namespace Patodois.RewriteLink
             public Frame ReadLatest(Wire.FrameReady ready, bool wantDepth)
             {
                 if (ready == null) return null;
-                if (ready.Frame <= _newest) { SkippedOtherFrame++; return null; }
+                if (ready.Frame != 0 && ready.Frame <= _newest) { SkippedStale++; SkippedOtherFrame++; return null; }
                 Frame f = Read(ready, wantDepth);
                 if (f != null) _newest = f.Number;
                 return f;
@@ -288,16 +298,55 @@ namespace Patodois.RewriteLink
             [DllImport("libc", EntryPoint = "pread", SetLastError = true)]
             private static extern IntPtr PRead(SafeFileHandle file, IntPtr buffer, UIntPtr count, long offset);
 
-            private bool CopyAt(long offset, byte* dst, int count)
+            internal Func<SafeFileHandle, IntPtr, UIntPtr, long, IntPtr> NativeReadOverride;
+            internal Action<long> BeforeCopy;
+
+            private bool ManagedCopyAt(long offset, byte* dst, int count)
             {
+                if (_fallbackScratch.Length == 0) _fallbackScratch = new byte[64 * 1024];
+                _file.Position = offset;
                 while (count > 0)
                 {
-                    long n = PRead(_file.SafeFileHandle, (IntPtr)dst, (UIntPtr)(uint)count, offset).ToInt64();
-                    if (n < 0 && Marshal.GetLastWin32Error() == 4) continue; // EINTR
+                    int n = _file.Read(_fallbackScratch, 0, Math.Min(count, _fallbackScratch.Length));
                     if (n <= 0) return false;
-                    dst += n; offset += n; count -= (int)n;
+                    fixed (byte* p = _fallbackScratch) Buffer.MemoryCopy(p, dst, count, n);
+                    dst += n; count -= n;
                 }
                 return true;
+            }
+
+            private bool CopyAt(long offset, byte* dst, int count)
+            {
+                bool ok = TryCopyAt(offset, dst, count);
+                if (!ok) _gone = true;
+                return ok;
+            }
+
+            private bool TryCopyAt(long offset, byte* dst, int count)
+            {
+                try
+                {
+                    BeforeCopy?.Invoke(offset);
+                    if (_nativeUnavailable) return ManagedCopyAt(offset, dst, count);
+                    while (count > 0)
+                    {
+                        long n;
+                        try
+                        {
+                            n = (NativeReadOverride == null ? PRead(_readHandle, (IntPtr)dst, (UIntPtr)(uint)count, offset) : NativeReadOverride(_readHandle, (IntPtr)dst, (UIntPtr)(uint)count, offset)).ToInt64();
+                        }
+                        catch (Exception e) when (e is DllNotFoundException || e is EntryPointNotFoundException || e is BadImageFormatException || e is PlatformNotSupportedException || e is MarshalDirectiveException || e is TypeInitializationException)
+                        {
+                            _nativeUnavailable = true;
+                            return ManagedCopyAt(offset, dst, count);
+                        }
+                        if (n < 0 && Marshal.GetLastWin32Error() == 4) continue;
+                        if (n <= 0) return false;
+                        dst += n; offset += n; count -= (int)n;
+                    }
+                    return true;
+                }
+                catch (Exception) { return false; } // I/O/provider/handle failures are misses.
             }
             private bool CopyRows(long offset, long stride, int row, int height, byte* dst)
             {
@@ -335,7 +384,7 @@ namespace Patodois.RewriteLink
             {
                 if (_disposed || slot < 0 || slot >= _l.Slots) return null;
                 if (frame == 0) { SkippedOtherFrame++; return null; } // never delivered (CONTRACT.md 9.6, reader step 0)
-                if (IsGone) { SkippedGone++; return null; }
+                if (IsGone) { _gone = true; SkippedGone++; return null; }
                 if (haveSize && (dw < 1 || dh < 1 || dw > (uint)_l.Width || dh > (uint)_l.Height)) { SkippedWrongSize++; return null; }
                 if (_view == null) return ReadFile(frame, slot, haveSize, dw, dh, wantDepth);
                 byte* p = _base + HeaderLen + (long)slot * _l.SlotSize; // checked at open: inside the file

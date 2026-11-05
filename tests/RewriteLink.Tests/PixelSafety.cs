@@ -37,14 +37,96 @@ namespace Patodois.RewriteLink.Tests
                 {
                     var field = typeof(PixelFile.Reader).GetField("_file", BindingFlags.Instance | BindingFlags.NonPublic);
                     var old = (FileStream)field.GetValue(r);
-                    field.SetValue(r, new TruncateAfterLength(w.Path));
+                    var wrapped = new TruncateAfterLength(w.Path);
+                    field.SetValue(r, wrapped);
+                    typeof(PixelFile.Reader).GetField("_readHandle", BindingFlags.Instance | BindingFlags.NonPublic).SetValue(r, wrapped.SafeFileHandle);
                     old.Dispose();
                     return r.Read(new Wire.FrameReady(1, 0, 0, 64, 64), false) == null ? 0 : 3;
                 }
             }
         }
+        private sealed class FailingRead : FileStream
+        {
+            internal FailingRead(string path) : base(path,FileMode.Open,FileAccess.Read,FileShare.ReadWrite|FileShare.Delete,1) { }
+            public override int Read(byte[] buffer,int offset,int count) { throw new IOException("injected provider failure"); }
+        }
+
+        private static void ApiTests()
+        {
+            T.Test("missing native pread falls back without escaping the game loop", () =>
+            {
+                if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) return;
+                foreach (Exception failure in new Exception[] { new DllNotFoundException("injected"), new EntryPointNotFoundException("injected"), new BadImageFormatException("injected"), new PlatformNotSupportedException("injected") })
+                using (var w = PixelFile.Writer.CreateTemp("fallback", 2,2,1,true))
+                {
+                    byte[] colour = new byte[16]; Array.Fill(colour,(byte)7);
+                    float[] depth = new float[4]; Array.Fill(depth,2f);
+                    w.Write(colour,depth,2,2,0,1);
+                    using (var r = PixelFile.Reader.Open(w.Path))
+                    {
+                        int calls=0;
+                        r.NativeReadOverride = (file,buffer,count,offset) => { calls++; throw failure; };
+                        var ready=new Wire.FrameReady(1,0,0,2,2);
+                        var f=r.ReadLatest(ready,true);
+                        T.Check(f!=null && f.Rgba[0]==7 && f.Depth[3]==2f,"managed positional fallback copies both planes");
+                        T.Check(r.Read(ready,false)!=null && calls==1,"unavailable native entry is not retried");
+                    }
+                }
+            });
+            T.Test("managed fallback I/O exceptions are contained as misses", () =>
+            {
+                if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) return;
+                using(var w=PixelFile.Writer.CreateTemp("fallback-io",2,2,1,false))
+                {
+                    w.Write(new byte[16],null,2,2,0,1);
+                    using(var r=PixelFile.Reader.Open(w.Path))
+                    {
+                        var field=typeof(PixelFile.Reader).GetField("_file",BindingFlags.Instance|BindingFlags.NonPublic);
+                        var old=(FileStream)field.GetValue(r); field.SetValue(r,new FailingRead(w.Path)); old.Dispose();
+                        r.NativeReadOverride=(file,buffer,count,offset)=>{throw new DllNotFoundException("injected");};
+                        T.Check(r.ReadLatest(new Wire.FrameReady(1,0,0,2,2),false)==null && r.IsGone,"failed fallback is a miss, not a game-loop exception");
+                    }
+                }
+            });
+            T.Test("truncation inside colour or depth cannot produce a frame", () =>
+            {
+                if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) return;
+                foreach (bool depth in new[] {false,true})
+                using (var w = PixelFile.Writer.CreateTemp("planes",16,8,1,true))
+                {
+                    w.Write(new byte[128],new float[32],8,4,0,1);
+                    using (var r=PixelFile.Reader.Open(w.Path))
+                    {
+                        long at=PixelFile.HeaderLen+(depth?w.DepthOffset:PixelFile.SlotHeaderLen);
+                        r.BeforeCopy=offset => { if(offset==at) using(var f=new FileStream(w.Path,FileMode.Open,FileAccess.Write,FileShare.ReadWrite|FileShare.Delete)) f.SetLength(at+64); };
+                        T.Check(r.Read(new Wire.FrameReady(1,0,0,8,4),depth)==null,"partial "+(depth?"depth":"colour")+" copy must be rejected");
+                    }
+                }
+            });
+            T.Test("two files have independent presentation order and optional depth", () =>
+            {
+                using(var a=PixelFile.Writer.CreateTemp("two-a",2,2,3,false))
+                using(var b=PixelFile.Writer.CreateTemp("two-b",3,2,3,true))
+                {
+                    for(int i=0;i<5;i++) a.Write(new byte[16],null,2,2,0,1);
+                    b.Write(new byte[24],new float[6],3,2,0,1);
+                    using(var ar=PixelFile.Reader.Open(a.Path)) using(var br=PixelFile.Reader.Open(b.Path))
+                    {
+                        var old=new Wire.FrameReady(5,2,0,2,2); var first=new Wire.FrameReady(1,1,0,3,2);
+                        T.Check(ar.ReadLatest(old,false)!=null && br.ReadLatest(old,true)==null,"old file announcement is not a current frame");
+                        var f=br.ReadLatest(first,false);
+                        T.Check(f!=null && f.Depth==null,"new file starts at 1 and depth can be skipped");
+                        T.Check(br.ReadLatest(first,true)==null && br.SkippedStale==1,"duplicate counted");
+                        long count=br.SkippedOtherFrame;
+                        T.Check(br.ReadLatest(null,false)==null && br.SkippedOtherFrame==count,"null is a miss without counters");
+                    }
+                }
+            });
+        }
+
         internal static void Run()
         {
+            ApiTests();
             T.Test("truncation after size cannot terminate the reader", () =>
             {
                 if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) { Console.WriteLine("Windows: different mapped-file semantics, Unix race test skipped"); return; }

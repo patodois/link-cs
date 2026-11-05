@@ -15,6 +15,7 @@ namespace Patodois.RewriteLink.Tests
 
         public static void Test(string name, Action body)
         {
+            if (!name.Contains(Environment.GetEnvironmentVariable("RBL_TEST_FILTER") ?? "")) return;
             try
             {
                 body();
