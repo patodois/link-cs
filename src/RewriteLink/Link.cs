@@ -435,6 +435,7 @@ namespace Patodois.RewriteLink
                 }
                 catch (SocketException)
                 {
+                    _lastError="cannot connect to loopback control port";
                     if (s != null) { try { s.Close(); } catch (SocketException) { } }
                     _nextTry = now + _cfg.ReconnectMs;
                 }
@@ -449,7 +450,11 @@ namespace Patodois.RewriteLink
                         if ((int)_connecting.GetSocketOption(SocketOptionLevel.Socket, SocketOptionName.Error) != 0) { AbortConnect(now); return; }
                         var ctl = new Ctl(_connecting);
                         _connecting = null;
-                        ctl.Queue(MakeHello(Wire.ProtocolVersion, null));
+                        if(!ctl.Queue(MakeHello(Wire.ProtocolVersion, null))) {
+                            _lastError="local hello control line too long";
+                            ctl.CloseQuietly();_state=State.Idle;_nextTry=now+_cfg.ReconnectMs;
+                            _events.Add(new LinkEvent.HandshakeFailed(_lastError));return;
+                        }
                         LinesSent++;
                         ctl.Flush();
                         _lastError = null;
@@ -466,6 +471,7 @@ namespace Patodois.RewriteLink
 
         private void AbortConnect(long now)
         {
+            _lastError = "connection attempt failed";
             if (_connecting != null) { try { _connecting.Close(); } catch (SocketException) { } }
             _connecting = null;
             _state = State.Idle;
@@ -477,8 +483,8 @@ namespace Patodois.RewriteLink
         {
             if (bye != null)
             {
-                ctl.Queue(new Control.Bye(bye));
-                LinesSent++;
+                if(ctl.Queue(new Control.Bye(bye))) LinesSent++;
+                else _lastError="local bye control line too long";
             }
             var c = new Closing(ctl, now);
             if (c.Pump(now)) _closing.Add(c);
@@ -606,7 +612,7 @@ namespace Patodois.RewriteLink
             long timeout = Math.Max(_cfg.TimeoutMs, 4L * h.HeartbeatMs);
             if (_role == Role.Host)
             {
-                _ctl.Queue(MakeHello(protocol, session));
+                if(!_ctl.Queue(MakeHello(protocol, session))) { _lastError="local hello control line too long";return _lastError; }
                 LinesSent++;
                 _ctl.Flush();
             }
@@ -619,6 +625,7 @@ namespace Patodois.RewriteLink
             _peerEp = new IPEndPoint(IPAddress.Loopback, (int)h.UdpPort);
             _timeoutMs = timeout;
             _state = State.Live;
+            _lastError = null;
             _lastHeard = now;
             _lastBeat = now;
             _events.Add(new LinkEvent.Connected(_peer));

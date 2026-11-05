@@ -28,6 +28,42 @@ namespace Patodois.RewriteLink.Tests
 
         public static void Run()
         {
+            Test("internal control limits: oversized host reply fails visibly", () =>
+            {
+                using(var host=Link.Host(new LinkConfig(new string('x',Wire.MaxLine)){ControlPort=0}))
+                using(var guest=Link.Guest(new LinkConfig("guest"){ControlPort=host.ControlPort}))
+                {
+                    Check(Until(2000,()=>{guest.Poll();return host.Poll().Any(e=>e is LinkEvent.HandshakeFailed);}),"oversized host reply reports failure");
+                    Check(!host.IsConnected&&host.LastError.Contains("hello")&&host.LinesSent==1,"only short error bye is counted");
+                }
+            });
+            Test("internal control limits: discarded bye is not counted", () =>
+            {
+                using(var listener=new Socket(AddressFamily.InterNetwork,SocketType.Stream,ProtocolType.Tcp))
+                {
+                    listener.Bind(new IPEndPoint(IPAddress.Loopback,0));listener.Listen(1);
+                    using(var socket=new Socket(AddressFamily.InterNetwork,SocketType.Stream,ProtocolType.Tcp))
+                    { socket.Connect(listener.LocalEndPoint);
+                      using(var peer=listener.Accept()) using(var guest=Link.Guest(new LinkConfig("guest")))
+                      {
+                        var type=typeof(Link).GetNestedType("Ctl",System.Reflection.BindingFlags.NonPublic);
+                        var ctl=Activator.CreateInstance(type,new object[]{socket});
+                        var method=typeof(Link).GetMethod("Retire",System.Reflection.BindingFlags.NonPublic|System.Reflection.BindingFlags.Instance);
+                        method.Invoke(guest,new object[]{ctl,new string('x',Wire.MaxLine),0L});
+                        Check(guest.LinesSent==0&&guest.LastError.Contains("bye"),"discarded bye has local error and no sent count");
+                      }
+                    }
+                }
+            });
+            Test("internal control limits: oversized hello fails visibly", () =>
+            {
+                using(var host=Link.Host(new LinkConfig("host"){ControlPort=0}))
+                using(var guest=Link.Guest(new LinkConfig(new string('x',Wire.MaxLine)){ControlPort=host.ControlPort}))
+                {
+                    Check(Until(2000,()=>{host.Poll();return guest.Poll().Any(e=>e is LinkEvent.HandshakeFailed);}),"oversized hello must report failure");
+                    Check(guest.LinesSent==0 && guest.LastError!=null,"discarded hello not counted and diagnostic retained");
+                }
+            });
             Test("endpoint failures are visible and clear after recovery", () =>
             {
                 if (!Posix.IsUnix) return;
