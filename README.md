@@ -108,7 +108,7 @@ How the file is written on `netstandard2.0`: on Unix a directory with mode 0700 
 first byte is written, renamed over the target, and the directory is removed. On .NET 7+ the runtime's own calls do this (found by reflection); on Mono, Unity and the like,
 libc's `mkdir`, `chmod` and `rename` (not the variadic `open`, which cannot be called through P/Invoke on Apple arm64). The tests run both paths. On Windows the file is
 created with `FileMode.CreateNew` beside the target and moved over it (`File.Replace`, or `File.Move` if the target is new, with a tiny window in between): the per-user ACL of
-the directory (`%LOCALAPPDATA%`) is what keeps others out. The Windows path has not been run.
+the directory (`%LOCALAPPDATA%`) is what keeps others out. The Windows path runs in CI on `windows-latest`: a host with an endpoint file writes it, a guest reads it and closing deletes it, and the endpoint vectors pass there (43 cases, 4 of them skip themselves on Windows: file modes and a FIFO). The test of the write and read round trip with the runtime's calls and with libc's is Unix only, and no test checks the directory's ACL.
 
 The reader's permission check (`mode & 077`) uses `File.GetUnixFileMode`, which exists from .NET 7: on older runtimes (Mono, Unity, .NET Framework) it is **skipped**. Like the pixel
 reader, it tells a FIFO or device from a regular file by its size 0 before opening (a peer that swaps the file after the check can still get through).
@@ -231,6 +231,10 @@ in both roles, each pair twice: with the guest rendering a 320x240 frame with a 
 
 ## Notes and limits
 
-- Developed and tested on macOS (arm64, .NET 8). The CI workflow also builds and runs the tests on Linux and Windows; its results are not recorded here, and the Windows paths (Winsock behaviour of non-blocking connect,
-  file sharing of the pixel file, the endpoint file's `File.Replace`/`File.Move` and its per-user ACL) are unverified.
+- Developed on macOS (arm64, .NET 8). The CI workflow builds the solution and runs the test project on Linux, macOS and
+  `windows-latest` (.NET 8 SDK). The run on `main` of 2026-11-04 passed on all three; on Windows it ran 74 checks, which include
+  the live sessions in one process over loopback (Winsock, non-blocking connect), the pixel file and the shared vectors, and the
+  endpoint file through a host and a guest (`File.Replace`/`File.Move`). The demo host and guest against each other
+  (`tests/interop.sh`) run on Linux and macOS only; that step is skipped on Windows. **Never run on Windows:** the two-process
+  demo, the cross-language interop, a game process (Unity, Mono, IL2CPP), and Wine. No test checks the endpoint file's per-user ACL.
 - Strings are UTF-16 in memory and UTF-8 on the wire; text that is not valid UTF-16 is sent with U+FFFD.
