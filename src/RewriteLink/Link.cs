@@ -234,6 +234,10 @@ namespace Patodois.RewriteLink
         private uint _lastCollision;
         private Assembly _assembly;
         private bool _closed;
+        private string _lastError;
+
+        /// <summary>Latest local connection or control error, without token contents; cleared on successful connection.</summary>
+        public string LastError { get { lock (_gate) { return _lastError; } } }
 
         // revision 6 (CONTRACT.md 6.2)
         private byte[] _tokenBytes;     // host: the UTF-8 bytes of the token it requires (configured or generated), else null
@@ -414,7 +418,7 @@ namespace Patodois.RewriteLink
                     // attempt; try again after the reconnect delay (no event: the host is just not there yet).
                     EndpointInfo ep;
                     try { ep = Endpoint.Read(_cfg.EndpointFile); }
-                    catch (EndpointException) { _nextTry = now + _cfg.ReconnectMs; return; }
+                    catch (EndpointException e) { _lastError = "endpoint file: " + e.Message; _nextTry = now + _cfg.ReconnectMs; return; }
                     port = ep.ControlPort;
                     _helloToken = ep.Token;
                 }
@@ -448,6 +452,7 @@ namespace Patodois.RewriteLink
                         ctl.Queue(MakeHello(Wire.ProtocolVersion, null));
                         LinesSent++;
                         ctl.Flush();
+                        _lastError = null;
                         _ctl = ctl;
                         _state = State.Handshake;
                         _since = now;

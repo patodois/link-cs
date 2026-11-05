@@ -29,6 +29,12 @@ Unix uses bounded positional I/O, with a managed FileStream fallback if native p
 be loaded; Windows retains a protected read-only map. See [PIXEL-IO.md](PIXEL-IO.md).
 
 
+Unix runtimes without a permission-check API refuse `EndpointFile` instead of trusting an
+unverifiable token file. Inspect `Link.LastError` after `Poll` to see this refusal (or a missing
+endpoint); a successful connection clears it. This affects older .NET, Mono and Unity runtimes.
+Use explicit trusted port/token configuration there. Endpoint writers can still create files
+for readers on runtimes that can verify their permissions.
+
 ## A host
 
 ```csharp
@@ -147,7 +153,7 @@ Revision 4, all of it implemented, each rule with a test that fails without it:
 
 - paced collision, at most 32 chunks per `Poll` (fewer if the OS granted a small receive buffer: Linux keeps at most
   `net.core.rmem_max`), a newer snapshot replaces queued chunks; a 4 MiB UDP receive buffer is requested;
-- a new `frame_channel` resets the frame staleness; datagrams are accepted only from `127.0.0.1:<peer port>`;
+- a new `frame_channel` requires a new pixel reader and cleared cached pixels; datagrams are accepted only from `127.0.0.1:<peer port>`;
 - poses only for spawned entities, at most 1024 live ones (`UnknownEntity`, `SpawnIgnored`);
 - `heartbeat_ms` 10 to 10000: out of range in a `hello` is a handshake error, in your own config it is clamped;
 - the pixel file reader: an absolute path to a regular file, width and height at most 16384, at most 2^26 pixels,

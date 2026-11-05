@@ -28,6 +28,32 @@ namespace Patodois.RewriteLink.Tests
 
         public static void Run()
         {
+            Test("endpoint failures are visible and clear after recovery", () =>
+            {
+                if (!Posix.IsUnix) return;
+                var property=typeof(Link).GetProperty("LastError");
+                Check(property!=null,"Link.LastError must expose endpoint refusal");
+                string dir=NewDir(),file=Path.Combine(dir,"endpoint.json"),secret="private-test-token";
+                try
+                {
+                    using(var host=Link.Host(new LinkConfig("host"){ControlPort=0,Token=secret}))
+                    {
+                        Endpoint.Write(file,host.ControlPort,secret);
+                        using(var guest=Link.Guest(new LinkConfig("guest"){EndpointFile=file,ReconnectMs=50}))
+                        {
+                            Posix.ForceNoPermissionApi=true;
+                            try {guest.Poll();}
+                            finally {Posix.ForceNoPermissionApi=false;}
+                            string error=(string)property.GetValue(guest);
+                            Check(error!=null && error.Contains("permissions") && !error.Contains(secret),"sanitized unsupported permission error");
+                            Check(!guest.IsConnected,"unverifiable endpoint remains refused");
+                            Check(Until(3000,()=>{host.Poll();guest.Poll();return guest.IsConnected&&host.IsConnected;}),"connect after API recovery");
+                            Check(property.GetValue(guest)==null,"successful connection clears the error");
+                        }
+                    }
+                }
+                finally {Posix.ForceNoPermissionApi=false;File.Delete(file);Directory.Delete(dir);}
+            });
             Test("endpoint: unknown Unix permissions fail closed", () =>
             {
                 if (!Posix.IsUnix) return;
