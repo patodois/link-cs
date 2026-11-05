@@ -31,7 +31,7 @@ namespace Patodois.RewriteLink.Tests
         /// the vectors: run scripts/sync-link-vectors.sh REPO_DIR in the rewrite-bridge repository (it copies the directory and prints
         /// "VECTORS_DIGEST = ..."), paste that value here, then run the tests and sort out the new or changed vectors.
         /// </summary>
-        private const string VectorsDigest = "547bf4ff7f5369d3ba2d18eca05a2530b8daff0d3e6517471bc5ac0185122d13";
+        private const string VectorsDigest = "07cf745d30318403b1808b974f050914db061d78a4351683e0c20fc0284ceab8";
 
         /// <summary>Vectors this library fails, id -> why. Empty when it passes them all.</summary>
         private static readonly Dictionary<string, string> KnownDisagreements = new Dictionary<string, string>
@@ -526,6 +526,12 @@ namespace Patodois.RewriteLink.Tests
         /// <summary>Null: passed. "skip:" prefix: the platform cannot make this kind of path.</summary>
         private static string CheckPixelReader(Dictionary<string, object> c)
         {
+            if(c.ContainsKey("channels")) {
+                foreach(var channel in (List<object>)c["channels"]) {
+                    string error=CheckPixelReader((Dictionary<string,object>)channel);if(error!=null) return error;
+                }
+                return null;
+            }
             using (var t = new TempDir("pf"))
             {
                 string path = t.At("pixel.frames");
