@@ -31,7 +31,7 @@ namespace Patodois.RewriteLink.Tests
         /// the vectors: run scripts/sync-link-vectors.sh REPO_DIR in the rewrite-bridge repository (it copies the directory and prints
         /// "VECTORS_DIGEST = ..."), paste that value here, then run the tests and sort out the new or changed vectors.
         /// </summary>
-        private const string VectorsDigest = "e0de8c0cc9146c1351e56047a14e80128717a56944f7e0a5b2f6189d8de88b6a";
+        private const string VectorsDigest = "547bf4ff7f5369d3ba2d18eca05a2530b8daff0d3e6517471bc5ac0185122d13";
 
         /// <summary>Vectors this library fails, id -> why. Empty when it passes them all.</summary>
         private static readonly Dictionary<string, string> KnownDisagreements = new Dictionary<string, string>
@@ -470,7 +470,8 @@ namespace Patodois.RewriteLink.Tests
             ulong frame = J.U64(rd["frame"]);
             int slot = (int)J.U32(rd["slot"]);
             bool wantDepth = J.IsTrue(rd, "want_depth");
-            PixelFile.Frame got = reader.Read(frame, slot, J.U32(rd["width"]), J.U32(rd["height"]), wantDepth);
+            var ready = new Wire.FrameReady(frame, (uint)slot, J.U32(rd["camera_seq"]), J.U32(rd["width"]), J.U32(rd["height"]));
+            PixelFile.Frame got = J.IsTrue(rd, "latest") ? reader.ReadLatest(ready, wantDepth) : reader.Read(ready, wantDepth);
             switch (J.Str(rd, "expect", null))
             {
                 case "skip":
