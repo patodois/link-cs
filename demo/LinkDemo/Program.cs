@@ -106,7 +106,15 @@ namespace Patodois.RewriteLink.Demo
                         case LinkEvent.Frame fr:
                         {
                             PixelFile.Frame f = reader?.ReadLatest(fr.Value, true);
-                            if (f == null) framesMissed++;
+                            if (f == null)
+                            {
+                                framesMissed++;
+                                if (reader != null && reader.IsGone)
+                                {
+                                    reader.Dispose(); reader = null; lastFrame = "none";
+                                    Log("host", "pixel file gone; cleared cached frame");
+                                }
+                            }
                             else { framesRead++; lastFrame = Describe(f); }
                             break;
                         }
