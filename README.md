@@ -124,7 +124,7 @@ libc's `mkdir`, `chmod` and `rename` (not the variadic `open`, which cannot be c
 created with `FileMode.CreateNew` beside the target and moved over it (`File.Replace`, or `File.Move` if the target is new, with a tiny window in between): the per-user ACL of
 the directory (`%LOCALAPPDATA%`) is what keeps others out. The Windows path runs in CI on `windows-latest`: a host with an endpoint file writes it, a guest reads it and closing deletes it, and the endpoint vectors pass there (43 cases, 4 of them skip themselves on Windows: file modes and a FIFO). The test of the write and read round trip with the runtime's calls and with libc's is Unix only, and no test checks the directory's ACL.
 
-The reader's permission check (`mode & 077`) uses `File.GetUnixFileMode`, which exists from .NET 7: on older runtimes (Mono, Unity, .NET Framework) it is **skipped**. Like the pixel
+The reader's permission check (`mode & 077`) uses `File.GetUnixFileMode`, available from .NET 7. Unix runtimes without either permission API refuse endpoint files rather than trust an unverifiable token. This includes older Mono/Unity/.NET runtimes; applications there can still supply an explicit port and token through their own trusted configuration. Like the pixel
 reader, it tells a FIFO or device from a regular file by its size 0 before opening (a peer that swaps the file after the check can still get through).
 
 ## Contract revision 5 (and 4)

@@ -139,7 +139,7 @@ namespace Patodois.RewriteLink
         /// <summary>
         /// Reads and checks the endpoint file: the path names a regular file (symbolic links are followed; a directory, or a FIFO or device, which
         /// <c>netstandard2.0</c> can only tell by its size of 0, is refused before it is opened); on Unix its permissions grant nothing to the group or
-        /// to others (where the runtime has <c>File.GetUnixFileMode</c>, .NET 7+; on older runtimes the check is skipped); it is at most 4096 bytes;
+        /// to others (using <c>File.GetUnixFileMode</c>, .NET 7+; runtimes without a permission API refuse endpoint files); it is at most 4096 bytes;
         /// its text is one control line (strict UTF-8, one trailing newline allowed) holding an object with a <c>control_port</c> integer 1 to 65535 and
         /// a <c>token</c> string of 1 to 256 bytes; other fields are ignored. Throws <see cref="EndpointException"/> otherwise, with a message that
         /// never contains the file's contents.
@@ -172,7 +172,8 @@ namespace Patodois.RewriteLink
                 if (Posix.IsUnix)
                 {
                     int mode = Posix.Permissions(fs.SafeFileHandle, path);
-                    if (mode >= 0 && (mode & 63) != 0) throw new EndpointException("the endpoint file's permissions allow the group or others to access it");
+                    if (mode < 0) throw new EndpointException("cannot verify the endpoint file permissions on this runtime");
+                    if ((mode & 63) != 0) throw new EndpointException("the endpoint file's permissions allow the group or others to access it");
                 }
                 while (n < buf.Length)
                 {
@@ -234,6 +235,9 @@ namespace Patodois.RewriteLink
     {
         /// <summary>Tests only: use the libc calls even where the runtime has its own.</summary>
         public static volatile bool ForcePInvoke;
+
+        // Tests only: emulate a runtime without either Unix permission API.
+        internal static bool ForceNoPermissionApi;
 
         /// <summary>Tests only: which path the last call took, "runtime" or "libc".</summary>
         public static volatile string LastPath = "";
@@ -315,6 +319,7 @@ namespace Patodois.RewriteLink
         /// <summary>The permission bits (0 to 0777) of the open file, or -1 where the runtime cannot tell (before .NET 7).</summary>
         public static int Permissions(SafeFileHandle h, string path)
         {
+            if (ForceNoPermissionApi) return -1;
             if (GetModeHandle != null) return Convert.ToInt32(Invoke(GetModeHandle, h), CultureInfo.InvariantCulture) & 511;
             if (GetModePath != null) return Convert.ToInt32(Invoke(GetModePath, path), CultureInfo.InvariantCulture) & 511;
             return -1;

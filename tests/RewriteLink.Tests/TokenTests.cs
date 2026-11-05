@@ -28,6 +28,29 @@ namespace Patodois.RewriteLink.Tests
 
         public static void Run()
         {
+            Test("endpoint: unknown Unix permissions fail closed", () =>
+            {
+                if (!Posix.IsUnix) return;
+                string dir = NewDir();
+                string file = Path.Combine(dir, "endpoint.json");
+                try
+                {
+                    Endpoint.Write(file, 47800, "test-token");
+                    foreach (int mode in new[] {384, 438}) // 0600 and 0666
+                    {
+                        Posix.Chmod(file, mode);
+                        Posix.ForceNoPermissionApi = true;
+                        bool refused = false;
+                        try { Endpoint.Read(file); }
+                        catch (EndpointException e) { refused = e.Message.Contains("permissions"); }
+                        finally { Posix.ForceNoPermissionApi = false; }
+                        Check(refused, "unverifiable permissions must not authorize an endpoint");
+                    }
+                    Posix.Chmod(file, 384);
+                    Check(Endpoint.Read(file).ControlPort == 47800, "known owner-only permissions remain usable");
+                }
+                finally { Posix.ForceNoPermissionApi = false; File.Delete(file); Directory.Delete(dir); }
+            });
             Test("token: constant-time comparison gives the right answers", () =>
             {
                 Check(Tokens.Equal(B("secret"), B("secret")), "equal");
