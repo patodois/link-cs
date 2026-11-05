@@ -88,6 +88,26 @@ namespace Patodois.RewriteLink.Tests
                     }
                 }
             });
+            T.Test("pixel widths can shrink and grow without stale pixels", () =>
+            {
+                foreach(bool wantDepth in new[]{false,true})
+                using(var w=PixelFile.Writer.CreateTemp("widths",16,16,1,true))
+                using(var r=PixelFile.Reader.Open(w.Path))
+                {
+                    int frame=0;
+                    foreach(int width in new[]{15,14,15,8,7,16,1,14,15})
+                    {
+                        frame++;int count=width*9;
+                        var pixels=new byte[count*4];var depth=new float[count];
+                        for(int j=0;j<pixels.Length;j++) pixels[j]=(byte)(j*37+frame*11);
+                        for(int j=0;j<count;j++) depth[j]=j+frame*1000;
+                        w.Write(pixels,depth,width,9,0,(ulong)frame);
+                        var got=r.ReadLatest(new Wire.FrameReady((ulong)frame,0,0,(uint)width,9),wantDepth);
+                        T.Check(got!=null && System.Linq.Enumerable.SequenceEqual(got.Rgba,pixels),"colour frame "+frame+" width "+width);
+                        if(wantDepth) T.Check(System.Linq.Enumerable.SequenceEqual(got.Depth,depth),"depth frame "+frame);
+                    }
+                }
+            });
             T.Test("truncation inside colour or depth cannot produce a frame", () =>
             {
                 if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) return;
