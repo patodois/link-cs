@@ -420,7 +420,7 @@ namespace Patodois.RewriteLink.InteropPeer
                         if (!_reader.HasDepth) Fail("the guest's pixel file has no depth plane");
                         Log("opened the guest's pixel file " + c.Path);
                     }
-                    catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
+                    catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException || ex is PlatformNotSupportedException)
                     {
                         Fail("cannot open the guest's pixel file: " + ex.Message);
                     }

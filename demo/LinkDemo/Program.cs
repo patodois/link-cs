@@ -98,7 +98,7 @@ namespace Patodois.RewriteLink.Demo
                                 Log("host", "guest pixel file " + fc.Value.Path + " (" + fc.Value.Width + "x" + fc.Value.Height + ", " + fc.Value.Slots + " slots, depth plane: "
                                     + (reader.HasDepth ? "true" : "false") + ")");
                             }
-                            catch (Exception ex) when (ex is System.IO.IOException || ex is UnauthorizedAccessException)
+                            catch (Exception ex) when (ex is System.IO.IOException || ex is UnauthorizedAccessException || ex is PlatformNotSupportedException)
                             {
                                 Log("host", "cannot open the guest's pixel file: " + ex.Message);
                             }

@@ -53,6 +53,13 @@ namespace Patodois.RewriteLink.Tests
             public override int Read(byte[] buffer,int offset,int count) { throw new IOException("injected provider failure"); }
         }
 
+        private static void CallSample(MethodInfo method, object target, object[] args)
+        {
+            try { method.Invoke(target,args); }
+            catch(TargetInvocationException e) when(e.InnerException!=null)
+            { System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(e.InnerException).Throw(); }
+        }
+
         private static void ApiTests()
         {
             T.Test("missing native pread falls back without escaping the game loop", () =>
@@ -87,6 +94,47 @@ namespace Patodois.RewriteLink.Tests
                         var old=(FileStream)field.GetValue(r); field.SetValue(r,new FailingRead(w.Path)); old.Dispose();
                         r.NativeReadOverride=(file,buffer,count,offset)=>{throw new DllNotFoundException("injected");};
                         T.Check(r.ReadLatest(new Wire.FrameReady(1,0,0,2,2),false)==null && r.IsGone,"failed fallback is a miss, not a game-loop exception");
+                    }
+                }
+            });
+            T.Test("demo reports an unsupported pixel process without escaping its host loop", () =>
+            {
+                using(var w=PixelFile.Writer.CreateTemp("demo-unsupported",64,48,3,true))
+                using(var host=Link.Host(new LinkConfig("host"){ControlPort=0}))
+                using(var guest=Link.Guest(new LinkConfig("guest"){ControlPort=host.ControlPort}))
+                {
+                    T.Check(T.Until(2000,()=>{host.Poll();guest.Poll();return host.IsConnected&&guest.IsConnected;}),"loopback connected");
+                    guest.AnnounceFrames(w);guest.Poll();
+                    var program=Type.GetType("Patodois.RewriteLink.Demo.Program, LinkDemo",true);
+                    program.GetField("_clock",BindingFlags.Static|BindingFlags.NonPublic).SetValue(null,Stopwatch.StartNew());
+                    var output=new StringWriter();var saved=Console.Out;
+                    PixelFile.ProcessPointerSize=4;
+                    try
+                    {
+                        Console.SetOut(output);
+                        CallSample(program.GetMethod("RunHost",BindingFlags.Static|BindingFlags.NonPublic),null,new object[]{host,0.1});
+                    }
+                    finally {Console.SetOut(saved);PixelFile.ProcessPointerSize=IntPtr.Size;}
+                    T.Check(output.ToString().Contains("cannot open the guest's pixel file")&&output.ToString().Contains("64-bit"),"demo logs the unsupported process");
+                }
+            });
+            T.Test("interop reports an unsupported pixel process without escaping its event handler", () =>
+            {
+                using(var w=PixelFile.Writer.CreateTemp("interop-unsupported",64,48,3,true))
+                {
+                    var type=Type.GetType("Patodois.RewriteLink.InteropPeer.HostPeer, InteropPeer",true);
+                    object peer=Activator.CreateInstance(type,new object[]{0,"unsupported-pixels",null});
+                    using(var link=(Link)type.BaseType.GetField("Link",BindingFlags.Instance|BindingFlags.NonPublic).GetValue(peer))
+                    {
+                        var output=new StringWriter();var saved=Console.Out;
+                        PixelFile.ProcessPointerSize=4;
+                        try
+                        {
+                            Console.SetOut(output);
+                            CallSample(type.GetMethod("OnEvent",BindingFlags.Instance|BindingFlags.NonPublic),peer,new object[]{new LinkEvent.FrameChannel(new Control.FrameChannel(w.Path,64,48,3))});
+                        }
+                        finally {Console.SetOut(saved);PixelFile.ProcessPointerSize=IntPtr.Size;}
+                        T.Check(output.ToString().Contains("cannot open the guest's pixel file")&&output.ToString().Contains("64-bit"),"interop records the unsupported process");
                     }
                 }
             });

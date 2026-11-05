@@ -203,6 +203,8 @@ namespace Patodois.RewriteLink
             /// and no fstat to compare with, so a peer that swaps the file after the check can still get through; the contract asks for
             /// O_NONBLOCK and an inode comparison where the language has them.
             /// </summary>
+            /// <exception cref="PlatformNotSupportedException">The process is not 64-bit or the machine is not little-endian.
+            /// No file is opened and no native pixel I/O is attempted in that case.</exception>
             public static Reader Open(string path)
             {
                 RequireLittleEndian();
