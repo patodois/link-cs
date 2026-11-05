@@ -10,7 +10,7 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <Nullable>disable</Nullable>
     <Version>0.3.0</Version>
-    <Description>The rewrite-bridge passthrough link protocol v1 (revision 6): host and guest, for game mods in C#.</Description>
+    <Description>The rewrite-bridge passthrough link protocol v1 (revision 7): host and guest, for game mods in C#.</Description>
     <Authors>patodois</Authors>
     <PackageLicenseExpression>MIT OR Apache-2.0</PackageLicenseExpression>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
