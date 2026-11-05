@@ -202,7 +202,7 @@ namespace Patodois.RewriteLink.InteropPeer
         protected int Protocol;
         protected uint Session;
         protected readonly List<uint> Spawns = new List<uint>(), Despawns = new List<uint>();
-        protected int Cameras, Poses, CollisionTriangles, FramesOk, FramesBad;
+        protected int Cameras, Poses, CollisionTriangles, FramesOk, FramesBad, PresentationRejections;
         protected readonly List<string> Focus = new List<string>();
         protected string LostReason;
         protected string Stats = "null";
@@ -365,6 +365,7 @@ namespace Patodois.RewriteLink.InteropPeer
             b.Append(",\"despawns\":").Append(List(Despawns.Select(x => x.ToString(CultureInfo.InvariantCulture))));
             b.Append(",\"cameras\":").Append(Cameras).Append(",\"poses\":").Append(Poses);
             b.Append(",\"collision_triangles\":").Append(CollisionTriangles);
+            b.Append(",\"presentation_rejections\":").Append(PresentationRejections);
             b.Append(",\"frames_ok\":").Append(FramesOk).Append(",\"frames_bad\":").Append(FramesBad);
             b.Append(",\"focus\":").Append(List(Focus.Select(Quote)));
             b.Append(",\"lost_reason\":").Append(LostReason == null ? "null" : Quote(LostReason));
@@ -462,6 +463,8 @@ namespace Patodois.RewriteLink.InteropPeer
             }
         }
 
+        private Wire.FrameReady _previousFrame;
+
         private void OnFrame(Wire.FrameReady fr)
         {
             if (!_started || _k > Data.N || _gotFrame) { Fail("unexpected Frame event"); return; }
@@ -473,10 +476,21 @@ namespace Patodois.RewriteLink.InteropPeer
             else if (_reader == null) err = "no pixel file is open";
             else
             {
-                PixelFile.Frame f = _reader.Read(fr, true);
+                PixelFile.Frame f = _reader.ReadLatest(fr, true);
                 if (f == null) err = "the frame is not in the pixel file (or was skipped)";
                 else if (f.CameraSeq != _cameraSeq) err = "camera_seq in the slot is " + f.CameraSeq + ", expected " + _cameraSeq;
                 else err = Data.ComparePixels(f, _k);
+            }
+            if (_reader != null && err == null)
+            {
+                if (_reader.Read(fr,false)==null || _reader.ReadLatest(fr,false)!=null) Fail("a readable duplicate was presented twice");
+                else PresentationRejections++;
+                if (_previousFrame != null)
+                {
+                    if (_reader.Read(_previousFrame,false)==null || _reader.ReadLatest(_previousFrame,false)!=null) Fail("an older readable slot regressed presentation");
+                    else PresentationRejections++;
+                }
+                _previousFrame=fr;
             }
             if (err != null) { FramesBad++; Fail("frame " + _k + ": " + err); }
             else FramesOk++;
