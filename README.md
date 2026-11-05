@@ -1,6 +1,6 @@
 # link-cs
 
-A **C#** implementation of the **rewrite-bridge passthrough link protocol v1** (contract revision 6), so that a
+A **C#** implementation of the **rewrite-bridge passthrough link protocol v1** (contract revision 7), so that a
 game mod written for .NET or Unity (BepInEx, MelonLoader, a Valheim or Unturned mod ...) can be a **host** or a
 **guest** next to any other game or rewrite that speaks it. The protocol is defined by `docs/CONTRACT.md` in the
 rewrite-bridge repository; this library is one implementation of it, next to the Rust crate,
@@ -12,8 +12,22 @@ each other (see "Interop"). The API has the shape of link-java's `Link`.
 - `netstandard2.0`, so it loads in .NET Framework 4.6.1 and later, Mono, .NET and Unity's .NET Standard 2.0 profile.
   C# 7.3 language level, **no dependencies beyond the BCL**: sockets, `MemoryMappedFile`, `Volatile`, `Thread.MemoryBarrier`.
 - Everything binds and connects to `127.0.0.1` only. No threads are created: you call `Poll()`.
-- The only `unsafe` code is in `PixelFile` (a pointer into the mapped file, for the seqlock).
+- The only `unsafe` code is in `PixelFile` (mapped writer/Windows pointers and pinned Unix I/O buffers).
 - Licence: MIT OR Apache-2.0.
+
+## Migrating pixel consumers to 0.3.0
+
+`LinkEvent.Frame` is an unvalidated announcement. `Link` no longer filters frame numbers
+before checking slots. Present frames with `reader.ReadLatest(frameReady, wantDepth)`;
+`Read` remains an unordered inspection/re-read API. Set `wantDepth` to false to omit depth.
+Only successful copies advance order; `SkippedStale` counts duplicate/older nonzero frames.
+A null announcement returns null without changing counters. On a new channel, session loss,
+or `reader.IsGone`, dispose the old reader and clear the cached image, even when opening a
+replacement fails. Discard asynchronous results from replaced readers. This minor version
+is intentionally incompatible with old presentation consumers despite unchanged signatures.
+Unix uses bounded positional I/O, with a managed FileStream fallback if native pread cannot
+be loaded; Windows retains a protected read-only map. See [PIXEL-IO.md](PIXEL-IO.md).
+
 
 ## A host
 
@@ -72,7 +86,7 @@ guest.Close();
 | `IsConnected`, `Peer`, `Focus`, `ControlPort`, `UdpPort`, `Malformed`, `Stale`, `Foreign`, `UnknownEntity`, `SpawnIgnored`, `SendDropped`, `DatagramsSent/Received`, `LinesSent/Received` | State and statistics. |
 | `Tokens.Generate()` / `Link.GenerateToken()`, `Tokens.Equal(byte[], byte[])` | Revision 6: a new token (32 bytes of the OS CSPRNG as 64 lowercase hex digits), and the contract's constant-time comparison. |
 | `Endpoint.Write(path, controlPort, token)`, `Endpoint.Read(path)` (an `EndpointInfo` with `ControlPort` and `Token`), `Endpoint.Delete(path)` | Revision 6: the endpoint file as a launcher or a test would use it. `Write` and `Read` throw `EndpointException` (the message never contains the token or the file's contents). |
-| `PixelFile.Writer`, `PixelFile.Reader` | The pixel file with the seqlock, colour and the optional linear depth plane. Read a `Frame` datagram with `reader.Read(frameReady, wantDepth)`, which checks its width and height against the file and the slot header. |
+| `PixelFile.Writer`, `PixelFile.Reader` | The pixel file with the seqlock, colour and the optional linear depth plane. Read a `Frame` datagram with `reader.ReadLatest(frameReady, wantDepth)`, which checks its width and height against the file and the slot header. |
 | `Wire`, `Control`, `Quat` | The codecs and small helpers in the link's conventions (right-handed, +Y up, +Z front). |
 
 Events are `LinkEvent.Connected`, `Lost`, `HandshakeFailed`, `Camera`, `Poses`, `Collision`, `Frame`, `Spawn`, `Despawn`,
@@ -137,7 +151,7 @@ Revision 4, all of it implemented, each rule with a test that fails without it:
 - poses only for spawned entities, at most 1024 live ones (`UnknownEntity`, `SpawnIgnored`);
 - `heartbeat_ms` 10 to 10000: out of range in a `hello` is a handshake error, in your own config it is clamped;
 - the pixel file reader: an absolute path to a regular file, width and height at most 16384, at most 2^26 pixels,
-  `stride == width * 4`, checked arithmetic for every size, a length check against the mapping **before every read**; the
+  `stride == width * 4`, checked arithmetic for every size, a length check before each read and bounded Unix positional I/O (revision 7); the
   writer: created with `FileMode.CreateNew`, never resized or truncated, the same limits, deleted at the end;
 - control lines of at most 65536 bytes, strict UTF-8, and a JSON reader that accepts exactly what Rust's `serde_json`
   accepts (the same corpus as link-java and link-c; number ranges are decided on the digits, so the answer does not depend on
@@ -238,12 +252,3 @@ in both roles, each pair twice: with the guest rendering a 320x240 frame with a 
   (`tests/interop.sh`) run on Linux and macOS only; that step is skipped on Windows. **Never run on Windows:** the two-process
   demo, the cross-language interop, a game process (Unity, Mono, IL2CPP), and Wine. No test checks the endpoint file's per-user ACL.
 - Strings are UTF-16 in memory and UTF-8 on the wire; text that is not valid UTF-16 is sent with U+FFFD.
-
-### Ordem de apresentação de pixels
-
-Os eventos Frame são anúncios ainda não validados. Ao trocar frame_channel ou perder a sessão,
-limpe a imagem anterior e descarte o leitor anterior, inclusive se o novo arquivo não abrir.
-Use a leitura de apresentação read_latest (Rust/C), ReadLatest (C#) ou readLatest (Java):
-só uma cópia válida avança o maior número do arquivo atual. As leituras brutas continuam
-permitindo releituras e não implementam ordem de apresentação. Consumidores assíncronos devem
-associar trabalhos e resultados à instância do leitor e rejeitar resultados de leitores substituídos.
