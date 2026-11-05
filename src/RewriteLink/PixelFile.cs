@@ -67,6 +67,7 @@ namespace Patodois.RewriteLink
             public long DepthStride, DepthOffset;
         }
 
+
         private static void RequireLittleEndian()
         {
             if (!BitConverter.IsLittleEndian) throw new PlatformNotSupportedException("the pixel file code needs a little-endian machine");
@@ -355,6 +356,7 @@ namespace Patodois.RewriteLink
             private static extern IntPtr PReadV(SafeFileHandle file,IoVector* vectors,int count,long offset);
             private byte[] _paddingScratch=new byte[0];
             private bool _vectorsUnavailable;
+            internal Func<SafeFileHandle,IntPtr,int,long,IntPtr> NativeVectorReadOverride;
 
             private bool? VectorRows(long offset,long stride,int row,int height,byte* dst)
             {
@@ -377,7 +379,7 @@ namespace Patodois.RewriteLink
                         while(first<count)
                         {
                             long n;
-                            try {n=PReadV(_readHandle,vectors+first,count-first,at).ToInt64();}
+                            try {n=(NativeVectorReadOverride==null ? PReadV(_readHandle,vectors+first,count-first,at) : NativeVectorReadOverride(_readHandle,(IntPtr)(vectors+first),count-first,at)).ToInt64();}
                             catch(Exception e) when(e is DllNotFoundException || e is EntryPointNotFoundException || e is BadImageFormatException || e is PlatformNotSupportedException || e is MarshalDirectiveException || e is TypeInitializationException)
                             { _vectorsUnavailable=true;return null; }
                             if(n<0 && Marshal.GetLastWin32Error()==4) continue;

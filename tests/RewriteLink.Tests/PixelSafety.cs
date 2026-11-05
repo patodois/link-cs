@@ -8,6 +8,8 @@ namespace Patodois.RewriteLink.Tests
 {
     internal static class PixelSafety
     {
+        [DllImport("libc",EntryPoint="pread",SetLastError=true)]
+        private static extern IntPtr TestPRead(Microsoft.Win32.SafeHandles.SafeFileHandle file,IntPtr buffer,UIntPtr count,long offset);
         private sealed class TruncateAfterLength : FileStream
         {
             private readonly string _path;
@@ -85,6 +87,45 @@ namespace Patodois.RewriteLink.Tests
                         var old=(FileStream)field.GetValue(r); field.SetValue(r,new FailingRead(w.Path)); old.Dispose();
                         r.NativeReadOverride=(file,buffer,count,offset)=>{throw new DllNotFoundException("injected");};
                         T.Check(r.ReadLatest(new Wire.FrameReady(1,0,0,2,2),false)==null && r.IsGone,"failed fallback is a miss, not a game-loop exception");
+                    }
+                }
+            });
+            T.Test("short vector reads resume inside each iovec", () =>
+            {
+                if(RuntimeInformation.IsOSPlatform(OSPlatform.Windows))return;
+                using(var w=PixelFile.Writer.CreateTemp("short",16,16,1,true))
+                {
+                    var pixels=new byte[8*9*4];var depth=new float[8*9];
+                    for(int j=0;j<pixels.Length;j++)pixels[j]=(byte)(j*37);
+                    for(int j=0;j<depth.Length;j++)depth[j]=j+0.5f;
+                    w.Write(pixels,depth,8,9,0,1);
+                    using(var r=PixelFile.Reader.Open(w.Path))
+                    {
+                        int calls=0;
+                        r.NativeVectorReadOverride=(file,vectors,count,at)=>{
+                            calls++;var pointer=Marshal.ReadIntPtr(vectors);
+                            ulong length=(ulong)Marshal.ReadIntPtr(vectors,IntPtr.Size).ToInt64();
+                            return TestPRead(file,pointer,(UIntPtr)Math.Min(7UL,length),at);
+                        };
+                        var got=r.ReadLatest(new Wire.FrameReady(1,0,0,8,9),true);
+                        T.Check(got!=null&&System.Linq.Enumerable.SequenceEqual(got.Rgba,pixels)&&System.Linq.Enumerable.SequenceEqual(got.Depth,depth)&&calls>4,"all partial colour/padding/depth reads completed");
+                    }
+                }
+            });
+            T.Test("missing preadv falls back and still copies both planes", () =>
+            {
+                if(RuntimeInformation.IsOSPlatform(OSPlatform.Windows))return;
+                using(var w=PixelFile.Writer.CreateTemp("no-vector",16,16,1,true))
+                {
+                    var pixels=new byte[8*9*4];var depth=new float[8*9];
+                    for(int j=0;j<pixels.Length;j++)pixels[j]=(byte)(j*37);
+                    for(int j=0;j<depth.Length;j++)depth[j]=j+0.5f;
+                    w.Write(pixels,depth,8,9,0,1);
+                    using(var r=PixelFile.Reader.Open(w.Path))
+                    {
+                        int calls=0;r.NativeVectorReadOverride=(file,vectors,count,at)=>{calls++;throw new EntryPointNotFoundException("injected");};
+                        var got=r.ReadLatest(new Wire.FrameReady(1,0,0,8,9),true);
+                        T.Check(got!=null&&System.Linq.Enumerable.SequenceEqual(got.Rgba,pixels)&&System.Linq.Enumerable.SequenceEqual(got.Depth,depth)&&calls==1,"missing vector entry point uses bounded scalar copies");
                     }
                 }
             });
