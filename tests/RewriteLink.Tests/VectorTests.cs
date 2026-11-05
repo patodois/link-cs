@@ -31,7 +31,7 @@ namespace Patodois.RewriteLink.Tests
         /// the vectors: run scripts/sync-link-vectors.sh REPO_DIR in the rewrite-bridge repository (it copies the directory and prints
         /// "VECTORS_DIGEST = ..."), paste that value here, then run the tests and sort out the new or changed vectors.
         /// </summary>
-        private const string VectorsDigest = "1d64e93423f3be8b152260ad93c11f0c5459fa942be6912f3aeda13b3e66649f";
+        private const string VectorsDigest = "e0de8c0cc9146c1351e56047a14e80128717a56944f7e0a5b2f6189d8de88b6a";
 
         /// <summary>Vectors this library fails, id -> why. Empty when it passes them all.</summary>
         private static readonly Dictionary<string, string> KnownDisagreements = new Dictionary<string, string>

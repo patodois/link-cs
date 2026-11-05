@@ -238,3 +238,12 @@ in both roles, each pair twice: with the guest rendering a 320x240 frame with a 
   (`tests/interop.sh`) run on Linux and macOS only; that step is skipped on Windows. **Never run on Windows:** the two-process
   demo, the cross-language interop, a game process (Unity, Mono, IL2CPP), and Wine. No test checks the endpoint file's per-user ACL.
 - Strings are UTF-16 in memory and UTF-8 on the wire; text that is not valid UTF-16 is sent with U+FFFD.
+
+### Ordem de apresentação de pixels
+
+Os eventos Frame são anúncios ainda não validados. Ao trocar frame_channel ou perder a sessão,
+limpe a imagem anterior e descarte o leitor anterior, inclusive se o novo arquivo não abrir.
+Use a leitura de apresentação read_latest (Rust/C), ReadLatest (C#) ou readLatest (Java):
+só uma cópia válida avança o maior número do arquivo atual. As leituras brutas continuam
+permitindo releituras e não implementam ordem de apresentação. Consumidores assíncronos devem
+associar trabalhos e resultados à instância do leitor e rejeitar resultados de leitores substituídos.

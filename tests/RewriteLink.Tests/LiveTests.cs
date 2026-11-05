@@ -197,15 +197,41 @@ namespace Patodois.RewriteLink.Tests
 
             // ------------------------------------------------------------------ revision 4
 
+            Test("late old UDP does not poison the new channel", () =>
+            {
+                using (var p = new Pair())
+                using (var w = PixelFile.Writer.CreateTemp("order", 2, 2, 3, false))
+                {
+                    w.Write(new byte[16], null, 2, 2, 0, 1);
+                    p.Guest.AnnounceFrames(new Control.FrameChannel(w.Path, 2, 2, 3));
+                    Check(Until(1000, () => { p.Pump(); return p.H<LinkEvent.FrameChannel>() == 1; }), "channel");
+                    using (var r = PixelFile.Reader.Open(w.Path))
+                    {
+                        var old = new Wire.FrameReady(ulong.MaxValue, 1, 0, 2, 2);
+                        p.Guest.SendFrame(old);
+                        Check(Until(1000, () => { p.Pump(); return p.H<LinkEvent.Frame>() == 1; }), "old UDP");
+                        Check(r.ReadLatest(old, false) == null, "old UDP unreadable");
+                        p.HE.Clear();
+                        var good = new Wire.FrameReady(1, 1, 0, 2, 2);
+                        p.Guest.SendFrame(good);
+                        Check(Until(1000, () => { p.Pump(); return p.H<LinkEvent.Frame>() == 1; }), "valid frame 1 suppressed by old UDP");
+                        Check(r.ReadLatest(good, false) != null, "new pixels read");
+                        Check(r.ReadLatest(good, false) == null, "duplicate after validated copy");
+                        w.Write(new byte[16], null, 2, 2, 0, 2);
+                        Check(r.ReadLatest(new Wire.FrameReady(2, 2, 0, 2, 2), false) != null, "next frame");
+                        Check(r.Read(good, false) != null && r.ReadLatest(good, false) == null, "valid old slot cannot regress presentation");
+                    }
+                }
+            });
+
             Test("review M1: frames of a new pixel file are not stale", () =>
             {
                 using (var p = new Pair())
                 {
                     for (uint f = 1; f <= 10; f++) p.Guest.SendFrame(new Wire.FrameReady(f, f % 3, 0, 16, 8));
                     Check(Until(2000, () => { p.Pump(); return p.H<LinkEvent.Frame>() == 10; }), "10 frames of file 1");
-                    long s0 = p.Host.Stale;
                     p.Guest.SendFrame(new Wire.FrameReady(5, 2, 0, 16, 8));
-                    Check(Until(300, () => { p.Pump(); return p.Host.Stale > s0; }), "the same numbers again are stale");
+                    Check(Until(300, () => { p.Pump(); return p.H<LinkEvent.Frame>() == 11; }), "repeats need consumer validation");
                     p.HE.Clear();
                     p.Guest.AnnounceFrames(new Control.FrameChannel("/tmp/second.frames", 32, 16, 3));
                     Check(Until(2000, () => { p.Pump(); return p.H<LinkEvent.FrameChannel>() == 1; }), "the announcement");

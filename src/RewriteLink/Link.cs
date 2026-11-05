@@ -233,7 +233,6 @@ namespace Patodois.RewriteLink
         private bool _hasLastCollision;
         private uint _lastCollision;
         private Assembly _assembly;
-        private ulong _lastFrame;
         private bool _closed;
 
         // revision 6 (CONTRACT.md 6.2)
@@ -564,7 +563,6 @@ namespace Patodois.RewriteLink
             var fc = msg as Control.FrameChannel;
             if (fc != null)
             {
-                _lastFrame = 0; // a new pixel file numbers its frames from 1 again (CONTRACT.md 8)
                 _events.Add(new LinkEvent.FrameChannel(fc));
             }
             return false; // an Unknown type is ignored
@@ -642,7 +640,6 @@ namespace Patodois.RewriteLink
             _cqNext = 0;
             _hasLastCollision = false;
             _assembly = null;
-            _lastFrame = 0;
         }
 
         /// <summary>Ends the current connection, reporting it as lost (or as a failed handshake).</summary>
@@ -727,8 +724,6 @@ namespace Patodois.RewriteLink
             var fm = body as Wire.FrameMsg;
             if (fm != null)
             {
-                if (fm.Frame.Frame <= _lastFrame) { Stale++; return; }
-                _lastFrame = fm.Frame.Frame;
                 _events.Add(new LinkEvent.Frame(header, fm.Frame));
             }
             // A Heartbeat or an Unknown kind only counts as the peer being alive (done by the caller).

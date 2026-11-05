@@ -89,6 +89,7 @@ namespace Patodois.RewriteLink.Demo
                             nextCollision = t;
                             break;
                         case LinkEvent.FrameChannel fc:
+                            lastFrame = "none";
                             reader?.Dispose();
                             reader = null;
                             try
@@ -104,12 +105,13 @@ namespace Patodois.RewriteLink.Demo
                             break;
                         case LinkEvent.Frame fr:
                         {
-                            PixelFile.Frame f = reader?.Read(fr.Value, true);
+                            PixelFile.Frame f = reader?.ReadLatest(fr.Value, true);
                             if (f == null) framesMissed++;
                             else { framesRead++; lastFrame = Describe(f); }
                             break;
                         }
                         case LinkEvent.Lost l:
+                            lastFrame = "none";
                             reader?.Dispose();
                             reader = null;
                             Log("host", "LOST the guest: " + l.Reason);

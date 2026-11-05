@@ -146,6 +146,7 @@ namespace Patodois.RewriteLink
             private readonly long _mapped;
             private readonly Layout _l;
             private bool _disposed;
+            private ulong _newest;
 
             public int Slots { get { return _l.Slots; } }
             public int Width { get { return _l.Width; } }
@@ -220,6 +221,17 @@ namespace Patodois.RewriteLink
                     fs.Dispose();
                     throw;
                 }
+            }
+
+            /// <summary>Presentation copy: only a valid slot advances order within this file.
+            /// Open a new reader and invalidate the previous image on every channel replacement,
+            /// including failed opens. Read remains an unordered low-level copy.</summary>
+            public Frame ReadLatest(Wire.FrameReady ready, bool wantDepth)
+            {
+                if (ready == null || ready.Frame <= _newest) return null;
+                Frame f = Read(ready, wantDepth);
+                if (f != null) _newest = f.Number;
+                return f;
             }
 
             /// <summary>
