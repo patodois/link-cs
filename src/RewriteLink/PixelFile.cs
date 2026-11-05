@@ -4,6 +4,8 @@ using System.IO.MemoryMappedFiles;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
 
 namespace Patodois.RewriteLink
 {
@@ -31,6 +33,7 @@ namespace Patodois.RewriteLink
     /// </summary>
     public static unsafe class PixelFile
     {
+        private static bool IsWindows { get { return Path.DirectorySeparatorChar == '\\'; } }
         public const int HeaderLen = 64;
         public const int SlotHeaderLen = 64;
         public const uint FormatRgba8 = 1;
@@ -136,7 +139,7 @@ namespace Patodois.RewriteLink
 
         // ------------------------------------------------------------------ reader
 
-        /// <summary>Maps a pixel file read-only. Not thread-safe: use one reader per thread.</summary>
+        /// <summary>Copies a pixel file using pread on Unix and a read-only map on Windows. Not thread-safe: use one reader per thread.</summary>
         public sealed class Reader : IDisposable
         {
             private readonly FileStream _file;
@@ -164,9 +167,9 @@ namespace Patodois.RewriteLink
             }
 
             /// <summary>
-            /// True when the file is now shorter than the mapping made of it (the peer truncated it) or cannot be examined. <see cref="Read"/>
-            /// checks it before every copy and then returns null instead of touching the mapping, which would fault (SIGBUS). The check narrows
-            /// that window but cannot close it; a correct sender never truncates a pixel file. This guards against a broken or hostile one.
+            /// True when the file shrank or cannot be examined. Unix copies use bounded positional
+            /// I/O as well, so truncation after this check is a miss. Windows mappings prevent ordinary
+            /// truncation. A failed read never advances presentation order.
             /// </summary>
             public bool IsGone
             {
@@ -194,7 +197,7 @@ namespace Patodois.RewriteLink
                 FileAttributes attrs = File.GetAttributes(path);
                 if ((attrs & (FileAttributes.Directory | FileAttributes.ReparsePoint | FileAttributes.Device)) != 0) throw new FormatException("not a regular file: " + path);
                 if (new FileInfo(path).Length < HeaderLen) throw new FormatException("not a pixel file (or not a regular file): " + path);
-                FileStream fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                FileStream fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 1);
                 MemoryMappedFile mmf = null;
                 MemoryMappedViewAccessor view = null;
                 bool acquired = false;
@@ -202,15 +205,27 @@ namespace Patodois.RewriteLink
                 {
                     long size = fs.Length;
                     if (size < HeaderLen) throw new FormatException("pixel file shorter than its header");
-                    mmf = MemoryMappedFile.CreateFromFile(fs, null, 0, MemoryMappedFileAccess.Read, HandleInheritability.None, true);
-                    view = mmf.CreateViewAccessor(0, size, MemoryMappedFileAccess.Read);
-                    byte* p = null;
-                    view.SafeMemoryMappedViewHandle.AcquirePointer(ref p);
-                    acquired = true;
-                    p += view.PointerOffset;
                     var head = new byte[HeaderLen];
-                    for (int i = 0; i < HeaderLen; i++) head[i] = p[i];
+                    int got = 0;
+                    while (got < head.Length)
+                    {
+                        int n = fs.Read(head, got, head.Length - got);
+                        if (n == 0) throw new FormatException("pixel header truncated while opening");
+                        got += n;
+                    }
                     Layout l = Validate(head, size);
+                    byte* p = null;
+                    if (IsWindows)
+                    {
+                        // An active Windows mapping prevents ordinary file truncation.
+                        mmf = MemoryMappedFile.CreateFromFile(fs, null, 0, MemoryMappedFileAccess.Read, HandleInheritability.None, true);
+                        view = mmf.CreateViewAccessor(0, size, MemoryMappedFileAccess.Read);
+                        view.SafeMemoryMappedViewHandle.AcquirePointer(ref p);
+                        acquired = true;
+                        p += view.PointerOffset;
+                        // The section prevents later truncation; reject an earlier shrink.
+                        if (fs.Length < size) throw new FormatException("pixel file shrank before mapping");
+                    }
                     return new Reader(fs, mmf, view, p, size, l);
                 }
                 catch
@@ -228,7 +243,8 @@ namespace Patodois.RewriteLink
             /// including failed opens. Read remains an unordered low-level copy.</summary>
             public Frame ReadLatest(Wire.FrameReady ready, bool wantDepth)
             {
-                if (ready == null || ready.Frame <= _newest) return null;
+                if (ready == null) return null;
+                if (ready.Frame <= _newest) { SkippedOtherFrame++; return null; }
                 Frame f = Read(ready, wantDepth);
                 if (f != null) _newest = f.Number;
                 return f;
@@ -267,12 +283,61 @@ namespace Patodois.RewriteLink
                 return ReadSlot(frame, slot, false, 0, 0, wantDepth);
             }
 
+            // POSIX pread copies into owned buffers. It cannot fault a peer-owned mapping,
+            // and SafeFileHandle keeps the descriptor alive for the duration of each call.
+            [DllImport("libc", EntryPoint = "pread", SetLastError = true)]
+            private static extern IntPtr PRead(SafeFileHandle file, IntPtr buffer, UIntPtr count, long offset);
+
+            private bool CopyAt(long offset, byte* dst, int count)
+            {
+                while (count > 0)
+                {
+                    long n = PRead(_file.SafeFileHandle, (IntPtr)dst, (UIntPtr)(uint)count, offset).ToInt64();
+                    if (n < 0 && Marshal.GetLastWin32Error() == 4) continue; // EINTR
+                    if (n <= 0) return false;
+                    dst += n; offset += n; count -= (int)n;
+                }
+                return true;
+            }
+            private bool CopyRows(long offset, long stride, int row, int height, byte* dst)
+            {
+                if (stride == row) return CopyAt(offset, dst, row * height);
+                for (int y = 0; y < height; y++) if (!CopyAt(offset + y * stride, dst + y * row, row)) return false;
+                return true;
+            }
+            private Frame ReadFile(ulong frame, int slot, bool haveSize, uint dw, uint dh, bool wantDepth)
+            {
+                long at = HeaderLen + (long)slot * _l.SlotSize;
+                byte[] head = new byte[SlotHeaderLen];
+                fixed (byte* p = head) if (!CopyAt(at, p, head.Length)) { SkippedGone++; return null; }
+                ulong l1 = Wire.Get64(head, 0); Thread.MemoryBarrier();
+                if ((l1 & 1) != 0) { SkippedBusy++; return null; }
+                ulong f = Wire.Get64(head, 8), time = Wire.Get64(head, 16);
+                uint cam = Wire.Get32(head, 24), w = Wire.Get32(head, 28), h = Wire.Get32(head, 32);
+                if (f != frame) { SkippedOtherFrame++; return null; }
+                if (w < 1 || h < 1 || w > _l.Width || h > _l.Height || (haveSize && (w != dw || h != dh))) { SkippedWrongSize++; return null; }
+                int row = (int)w * 4;
+                var rgba = new byte[row * (int)h];
+                fixed (byte* p = rgba) if (!CopyRows(at + SlotHeaderLen, _l.Stride, row, (int)h, p)) { SkippedGone++; return null; }
+                float[] depth = null;
+                if (wantDepth && HasDepth)
+                {
+                    depth = new float[(int)w * (int)h];
+                    fixed (float* p = depth) if (!CopyRows(at + _l.DepthOffset, _l.DepthStride, row, (int)h, (byte*)p)) { SkippedGone++; return null; }
+                }
+                Thread.MemoryBarrier();
+                fixed (byte* p = head) if (!CopyAt(at, p, 16)) { SkippedGone++; return null; }
+                if (Wire.Get64(head, 0) != l1 || Wire.Get64(head, 8) != frame) { SkippedOverwritten++; return null; }
+                return new Frame { Number = f, TimeUs = time, CameraSeq = cam, Width = (int)w, Height = (int)h, Rgba = rgba, Depth = depth };
+            }
+
             private Frame ReadSlot(ulong frame, int slot, bool haveSize, uint dw, uint dh, bool wantDepth)
             {
                 if (_disposed || slot < 0 || slot >= _l.Slots) return null;
                 if (frame == 0) { SkippedOtherFrame++; return null; } // never delivered (CONTRACT.md 9.6, reader step 0)
                 if (IsGone) { SkippedGone++; return null; }
                 if (haveSize && (dw < 1 || dh < 1 || dw > (uint)_l.Width || dh > (uint)_l.Height)) { SkippedWrongSize++; return null; }
+                if (_view == null) return ReadFile(frame, slot, haveSize, dw, dh, wantDepth);
                 byte* p = _base + HeaderLen + (long)slot * _l.SlotSize; // checked at open: inside the file
                 long l1 = Volatile.Read(ref *(long*)p); // step 1: acquire load
                 if ((l1 & 1) != 0) { SkippedBusy++; return null; }
@@ -308,9 +373,8 @@ namespace Patodois.RewriteLink
             {
                 if (_disposed) return;
                 _disposed = true;
-                _view.SafeMemoryMappedViewHandle.ReleasePointer();
-                _view.Dispose();
-                _mmf.Dispose();
+                if (_view != null) { _view.SafeMemoryMappedViewHandle.ReleasePointer(); _view.Dispose(); }
+                if (_mmf != null) _mmf.Dispose();
                 _file.Dispose();
             }
         }
