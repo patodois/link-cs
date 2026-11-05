@@ -304,12 +304,13 @@ namespace Patodois.RewriteLink
             internal Func<SafeFileHandle, IntPtr, UIntPtr, long, IntPtr> NativeReadOverride;
             internal Action<long> BeforeCopy;
             internal Action BeforeFrameAllocation;
+            internal Action<string> BeforeScratchAllocation;
             public long SkippedAllocation;
             private byte[] _planeScratch = new byte[0];
 
             private bool ManagedCopyAt(long offset, byte* dst, int count)
             {
-                if (_fallbackScratch.Length == 0) _fallbackScratch = new byte[64 * 1024];
+                if (_fallbackScratch.Length == 0) { BeforeScratchAllocation?.Invoke("managed"); _fallbackScratch = new byte[64 * 1024]; }
                 _file.Position = offset;
                 while (count > 0)
                 {
@@ -352,6 +353,7 @@ namespace Patodois.RewriteLink
                     }
                     return true;
                 }
+                catch (OutOfMemoryException) { throw; } // ReadSlot counts allocation misses without marking the file gone.
                 catch (Exception) { return false; } // I/O/provider/handle failures are misses.
             }
             [StructLayout(LayoutKind.Sequential)]
@@ -367,7 +369,7 @@ namespace Patodois.RewriteLink
                 try
                 {
                     int gap=(int)stride-row;
-                    if(_paddingScratch.Length<gap) _paddingScratch=new byte[gap];
+                    if(_paddingScratch.Length<gap) { BeforeScratchAllocation?.Invoke("padding"); _paddingScratch=new byte[gap]; }
                     IoVector* vectors=stackalloc IoVector[16];
                     fixed(byte* padding=_paddingScratch)
                     for(int start=0;start<height;start+=8)
@@ -395,6 +397,7 @@ namespace Patodois.RewriteLink
                     }
                     return true;
                 }
+                catch(OutOfMemoryException) {throw;} // Preserve the recoverable allocation miss.
                 catch(Exception) {return false;}
             }
 
@@ -413,7 +416,7 @@ namespace Patodois.RewriteLink
                 if (stride <= 16 * 1024 && span <= (long)row * height * 4 && blockRows > 1)
                 {
                     int capacity = checked((int)((blockRows - 1) * stride + row));
-                    if (_planeScratch.Length < capacity) _planeScratch = new byte[capacity];
+                    if (_planeScratch.Length < capacity) { BeforeScratchAllocation?.Invoke("plane"); _planeScratch = new byte[capacity]; }
                     fixed (byte* p = _planeScratch)
                     {
                         for (int start = 0; start < height; start += blockRows)

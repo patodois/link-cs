@@ -114,6 +114,31 @@ namespace Patodois.RewriteLink.Tests
                     }
                 }
             });
+            foreach (string scratch in new[] { "padding", "plane", "managed" })
+            T.Test("scratch allocation failure keeps reader healthy: " + scratch, () =>
+            {
+                if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) return;
+                using(var w=PixelFile.Writer.CreateTemp("scratch-allocation",16,16,1,true))
+                {
+                    var colour=new byte[8*9*4];var depth=new float[8*9];
+                    for(int i=0;i<colour.Length;i++)colour[i]=(byte)(i*37);
+                    for(int i=0;i<depth.Length;i++)depth[i]=i+0.5f;
+                    w.Write(colour,depth,8,9,0,1);
+                    using(var r=PixelFile.Reader.Open(w.Path))
+                    {
+                        if(scratch=="plane")r.NativeVectorReadOverride=(file,vectors,count,at)=>{throw new EntryPointNotFoundException("injected");};
+                        if(scratch=="managed")r.NativeReadOverride=(file,buffer,count,at)=>{throw new EntryPointNotFoundException("injected");};
+                        r.BeforeScratchAllocation=kind=>{if(kind==scratch)throw new OutOfMemoryException("injected " + kind);};
+                        var ready=new Wire.FrameReady(1,0,0,8,9);
+                        T.Check(r.ReadLatest(ready,true)==null && !r.IsGone && r.SkippedAllocation==1 && r.SkippedGone==0,"scratch OOM is an allocation miss, not a gone file");
+                        r.BeforeScratchAllocation=null;
+                        var frame=r.ReadLatest(ready,true);
+                        T.Check(frame!=null,"same frame succeeds after scratch allocation recovers");
+                        for(int i=0;i<colour.Length;i++)T.Check(frame.Rgba[i]==colour[i],"recovered colour");
+                        for(int i=0;i<depth.Length;i++)T.Check(frame.Depth[i]==depth[i],"recovered depth");
+                    }
+                }
+            });
             T.Test("short vector reads resume inside each iovec", () =>
             {
                 if(RuntimeInformation.IsOSPlatform(OSPlatform.Windows))return;
