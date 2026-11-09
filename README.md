@@ -1,8 +1,6 @@
 # link-cs
 
-A **C#** implementation of the **rewrite-bridge passthrough link protocol v1** (contract revision 7), so that a
-game mod written for .NET or Unity (BepInEx, MelonLoader, a Valheim or Unturned mod ...) can be a **host** or a
-**guest** next to any other game or rewrite that speaks it. The protocol is defined by `docs/CONTRACT.md` in the
+link-cs implements the **rewrite-bridge passthrough link protocol v1** (contract revision 7) for **C#/.NET and Unity mod developers**, enabling a game to act as a host or guest alongside other games. The protocol is defined by `docs/CONTRACT.md` in the
 rewrite-bridge repository; this library is one implementation of it, next to the Rust crate,
 [link-java](https://github.com/patodois/link-java) and [link-c](https://github.com/patodois/link-c), and they talk to
 each other (see "Interop"). The API has the shape of link-java's `Link`.
