@@ -179,6 +179,38 @@ namespace Patodois.RewriteLink.Tests
                 }
             });
 
+            Test("a failed control write ends the session at the next poll, and a bye received before it decides the reason", () =>
+            {
+                foreach (bool sayBye in new[] { true, false })
+                {
+                    // On Windows a reset discards what the host has received but not read, the bye with it (CONTRACT 6.1): only the half without one.
+                    if (sayBye && OperatingSystem.IsWindows()) continue;
+                    using (var host = Link.Host(new LinkConfig("H") { ControlPort = 0 }))
+                    using (var r = new Raw(host.ControlPort))
+                    {
+                        r.Send(Raw.HelloLine("guest", 1, 1, r.UdpPort, 250));
+                        Check(r.WaitLine(host, 2000) != null, "the host's hello");
+                        if (sayBye) r.Send("{\"type\":\"bye\",\"reason\":\"leaving\"}\n");
+                        r.Tcp.LingerState = new LingerOption(true, 0);
+                        r.Tcp.Close(); // a reset; the host does not poll until its writes have failed
+                        bool failed = false;
+                        Check(Until(2000, () =>
+                        {
+                            try { host.Spawn(1, "P", "a", null); } catch (NotConnectedException) { failed = true; }
+                            return failed;
+                        }), "a control write fails");
+                        Check(!host.IsConnected && host.Peer == null, "not connected once a write has failed");
+                        Throws<NotConnectedException>(() => host.Spawn(2, "P", "a", null), "a control line after the failure");
+                        Throws<NotConnectedException>(() => host.SendCamera(Wire.Camera.LookAt(new float[] { 0, 0, 5 }, new float[3], 1f, .1f, 10f, 4, 4)), "a datagram after the failure");
+                        var lost = host.Poll().OfType<LinkEvent.Lost>().ToList();
+                        Eq(lost.Count, 1, "the next poll ends the session (" + (sayBye ? "with" : "without") + " a bye)");
+                        if (sayBye) Check(lost[0].Reason.Contains("peer said bye: leaving"), "the bye decides: " + lost[0].Reason);
+                        else Eq(lost[0].Reason, "control write failed", "without a bye the write error decides");
+                        Check(!host.IsConnected, "and the host waits for the next guest");
+                    }
+                }
+            });
+
             Test("Close returns within the linger even if the peer never closes", () =>
             {
                 var host = Link.Host(new LinkConfig("H") { ControlPort = 0 });

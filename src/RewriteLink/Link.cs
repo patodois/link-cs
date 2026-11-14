@@ -38,6 +38,7 @@ namespace Patodois.RewriteLink
             public int WLen;
             public string Fatal; // the stream is unusable (line too long, not UTF-8)
             public string End;   // the peer closed or the read failed: applies after the last complete line
+            public string WriteFailed; // a write failed: nothing more is written; the next poll handles the lines read and ends the session
 
             public Ctl(Socket s)
             {
@@ -56,8 +57,20 @@ namespace Patodois.RewriteLink
                 return true;
             }
 
-            /// <summary>Writes as much as the socket takes without blocking; returns an error reason or null.</summary>
-            public string Flush() { return FlushTo(Sock, WBuf, ref WLen); }
+            /// <summary>
+            /// Writes as much as the socket takes without blocking. A failed write is remembered in <see cref="WriteFailed"/>, the unsent bytes
+            /// are dropped and nothing more is written; the session ends at the next poll, after the lines already received (CONTRACT.md 6.1: a
+            /// received bye decides). Returns the reason only for the backlog rule (CONTRACT.md 7), which ends the session at once; else null.
+            /// </summary>
+            public string Flush()
+            {
+                if (WriteFailed != null) return null;
+                string err = FlushTo(Sock, WBuf, ref WLen);
+                if (err == WriteFailedReason) { WriteFailed = err; WLen = 0; return null; }
+                return err;
+            }
+
+            public const string WriteFailedReason = "control write failed";
 
             public static string FlushTo(Socket s, byte[] wbuf, ref int wlen)
             {
@@ -67,10 +80,10 @@ namespace Patodois.RewriteLink
                     SocketError err;
                     int n;
                     try { n = s.Send(wbuf, off, wlen - off, SocketFlags.None, out err); }
-                    catch (SocketException) { return "control write failed"; }
-                    catch (ObjectDisposedException) { return "control write failed"; }
+                    catch (SocketException) { return WriteFailedReason; }
+                    catch (ObjectDisposedException) { return WriteFailedReason; }
                     if (err == SocketError.WouldBlock || err == SocketError.InProgress) break;
-                    if (err != SocketError.Success) return "control write failed";
+                    if (err != SocketError.Success) return WriteFailedReason;
                     if (n <= 0) break;
                     off += n;
                 }
@@ -364,10 +377,14 @@ namespace Patodois.RewriteLink
         /// <summary>Host: the control port actually bound.</summary>
         public int ControlPort { get { return _controlPort; } }
         public int UdpPort { get { return _udpPort; } }
-        public bool IsConnected { get { lock (_gate) { return _state == State.Live; } } }
+        /// <summary>True while there is a session to send on: false from a failed control write until the next <see cref="Poll()"/> ends the session.</summary>
+        public bool IsConnected { get { lock (_gate) { return CanSend; } } }
         /// <summary>The peer of the current session, or null.</summary>
-        public PeerInfo Peer { get { lock (_gate) { return _state == State.Live ? _peer.Copy() : null; } } }
+        public PeerInfo Peer { get { lock (_gate) { return CanSend ? _peer.Copy() : null; } } }
         public Role Focus { get { lock (_gate) { return _focus; } } }
+
+        /// <summary>Live, and no control write has failed since the last poll.</summary>
+        private bool CanSend { get { return _state == State.Live && _ctl.WriteFailed == null; } }
 
         // ---------------------------------------------------------------- polling
 
@@ -507,7 +524,7 @@ namespace Patodois.RewriteLink
         /// <summary>Closes a control connection gracefully, after an optional bye.</summary>
         private void Retire(Ctl ctl, string bye, long now)
         {
-            if (bye != null)
+            if (bye != null && ctl.WriteFailed == null) // a stream that failed a write is retired without a bye
             {
                 if(ctl.Queue(new Control.Bye(bye))) LinesSent++;
                 else _lastError="local bye control line too long";
@@ -521,7 +538,7 @@ namespace Patodois.RewriteLink
             if (_state != State.Handshake && _state != State.Live) return;
             Ctl ctl = _ctl;
             string err = ctl.Flush();
-            if (err != null) { End(err, false); return; }
+            if (err != null) { End(err, false); return; } // the backlog rule ends the session at once
             ctl.Fill();
             while (true)
             {
@@ -538,7 +555,8 @@ namespace Patodois.RewriteLink
                 if (_state == State.Idle) return;
             }
             // A bye was handled above (it ends the session first), so an end of stream or a reset that follows a bye never reaches
-            // this point as a failure.
+            // this point as a failure. Neither does a write that failed since the last poll; without a bye, it ends the session here.
+            if (ctl.WriteFailed != null) { End(ctl.WriteFailed, false); return; }
             if (ctl.End != null) End(ctl.End, false);
         }
 
@@ -839,7 +857,7 @@ namespace Patodois.RewriteLink
         /// <summary>Sends one datagram to the peer and returns its seq.</summary>
         private uint Send(Wire.Datagram body)
         {
-            if (_state != State.Live) throw new NotConnectedException();
+            if (!CanSend) throw new NotConnectedException();
             var h = new Wire.Header(_peer.Protocol, 0, _peer.Session, _seq, Wire.NowUs());
             int len = Wire.EncodeInto(_tx, h, body);
             uint seq = _seq++;
@@ -855,6 +873,7 @@ namespace Patodois.RewriteLink
 
         private void SendHeartbeat()
         {
+            if (!CanSend) return; // a control write failed: this poll ends the session
             try { Send(new Wire.HeartbeatMsg()); } catch (WireException) { }
         }
 
@@ -869,7 +888,7 @@ namespace Patodois.RewriteLink
         {
             lock (_gate)
             {
-                if (_state != State.Live) throw new NotConnectedException();
+                if (!CanSend) throw new NotConnectedException();
                 for (int i = 0; i < poses.Count; i += Wire.MaxPoses)
                 {
                     int n = Math.Min(Wire.MaxPoses, poses.Count - i);
@@ -897,7 +916,7 @@ namespace Patodois.RewriteLink
         {
             lock (_gate)
             {
-                if (_state != State.Live) throw new NotConnectedException();
+                if (!CanSend) throw new NotConnectedException();
                 if (center == null || center.Length != 3) throw new ArgumentException("center needs 3 floats");
                 if (Wire.ChunkCount(triangleCount) > Wire.MaxCollisionChunks)
                     throw new ArgumentException("too many triangles: a snapshot has at most " + Wire.MaxCollisionChunks + " chunks (" + Wire.MaxCollisionChunks * Wire.MaxTriangles + " triangles)");
@@ -966,15 +985,17 @@ namespace Patodois.RewriteLink
 
         private void SendControl(Control c)
         {
-            if (_state != State.Live) throw new NotConnectedException();
+            if (!CanSend) throw new NotConnectedException();
             if (!_ctl.Queue(c)) throw new WireException("control line too long");
             LinesSent++;
             string err = _ctl.Flush();
             if (err != null)
             {
-                End(err, false);
+                End(err, false); // the backlog rule ends the session at once
                 throw new NotConnectedException();
             }
+            if (_ctl.WriteFailed != null) throw new NotConnectedException(); // the next Poll ends the session
+
         }
 
         /// <summary>Ends the session with a bye (the caller knows; no <see cref="LinkEvent.Lost"/> is reported for it).</summary>
