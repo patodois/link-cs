@@ -67,7 +67,7 @@ namespace Patodois.RewriteLink.Tests
             });
             Test("endpoint failures are visible and clear after recovery", () =>
             {
-                if (!Posix.IsUnix) return;
+                if (!Posix.IsUnix) Skip("Unix file modes");
                 var property=typeof(Link).GetProperty("LastError");
                 Check(property!=null,"Link.LastError must expose endpoint refusal");
                 string dir=NewDir(),file=Path.Combine(dir,"endpoint.json"),secret="private-test-token";
@@ -93,7 +93,7 @@ namespace Patodois.RewriteLink.Tests
             });
             Test("endpoint: unknown Unix permissions fail closed", () =>
             {
-                if (!Posix.IsUnix) return;
+                if (!Posix.IsUnix) Skip("Unix file modes");
                 string dir = NewDir();
                 string file = Path.Combine(dir, "endpoint.json");
                 try
@@ -169,7 +169,7 @@ namespace Patodois.RewriteLink.Tests
 
             Test("endpoint: write and read round trip, with the runtime's calls and with libc's", () =>
             {
-                if (OperatingSystem.IsWindows()) return; // the Unix paths; Windows is untested here
+                if (OperatingSystem.IsWindows()) Skip("the Unix paths; Windows is untested here");
                 foreach (bool forced in new[] { false, true })
                 {
                     Posix.ForcePInvoke = forced;
@@ -288,7 +288,7 @@ namespace Patodois.RewriteLink.Tests
 
             Test("endpoint: a FIFO swapped in between the checks and the open is refused without blocking (Unix)", () =>
             {
-                if (!Posix.IsUnix) return;
+                if (!Posix.IsUnix) Skip("no FIFOs");
                 foreach (string mode in new[] { "0600", "0644" })
                 {
                     string dir = NewDir(), file = Path.Combine(dir, "e.json"), fifo = Path.Combine(dir, "fifo");

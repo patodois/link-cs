@@ -64,7 +64,7 @@ namespace Patodois.RewriteLink.Tests
         {
             T.Test("missing native pread falls back without escaping the game loop", () =>
             {
-                if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) return;
+                if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) T.Skip("Unix positional I/O");
                 foreach (Exception failure in new Exception[] { new DllNotFoundException("injected"), new EntryPointNotFoundException("injected"), new BadImageFormatException("injected"), new PlatformNotSupportedException("injected") })
                 using (var w = PixelFile.Writer.CreateTemp("fallback", 2,2,1,true))
                 {
@@ -84,7 +84,7 @@ namespace Patodois.RewriteLink.Tests
             });
             T.Test("managed fallback I/O exceptions are contained as misses", () =>
             {
-                if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) return;
+                if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) T.Skip("Unix positional I/O");
                 using(var w=PixelFile.Writer.CreateTemp("fallback-io",2,2,1,false))
                 {
                     w.Write(new byte[16],null,2,2,0,1);
@@ -165,7 +165,7 @@ namespace Patodois.RewriteLink.Tests
             foreach (string scratch in new[] { "padding", "plane", "managed" })
             T.Test("scratch allocation failure keeps reader healthy: " + scratch, () =>
             {
-                if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) return;
+                if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) T.Skip("Unix positional I/O");
                 using(var w=PixelFile.Writer.CreateTemp("scratch-allocation",16,16,1,true))
                 {
                     var colour=new byte[8*9*4];var depth=new float[8*9];
@@ -189,7 +189,7 @@ namespace Patodois.RewriteLink.Tests
             });
             T.Test("short vector reads resume inside each iovec", () =>
             {
-                if(RuntimeInformation.IsOSPlatform(OSPlatform.Windows))return;
+                if(RuntimeInformation.IsOSPlatform(OSPlatform.Windows))T.Skip("Unix positional I/O");
                 using(var w=PixelFile.Writer.CreateTemp("short",16,16,1,true))
                 {
                     var pixels=new byte[8*9*4];var depth=new float[8*9];
@@ -211,7 +211,7 @@ namespace Patodois.RewriteLink.Tests
             });
             T.Test("missing preadv falls back and still copies both planes", () =>
             {
-                if(RuntimeInformation.IsOSPlatform(OSPlatform.Windows))return;
+                if(RuntimeInformation.IsOSPlatform(OSPlatform.Windows))T.Skip("Unix positional I/O");
                 using(var w=PixelFile.Writer.CreateTemp("no-vector",16,16,1,true))
                 {
                     var pixels=new byte[8*9*4];var depth=new float[8*9];
@@ -248,7 +248,7 @@ namespace Patodois.RewriteLink.Tests
             });
             T.Test("truncation inside colour or depth cannot produce a frame", () =>
             {
-                if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) return;
+                if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) T.Skip("Unix positional I/O");
                 foreach (bool depth in new[] {false,true})
                 using (var w = PixelFile.Writer.CreateTemp("planes",16,8,1,true))
                 {
@@ -263,7 +263,7 @@ namespace Patodois.RewriteLink.Tests
             });
             T.Test("cropped planes use bounded reusable spans", () =>
             {
-                if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) return;
+                if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) T.Skip("Unix positional I/O");
                 using(var w=PixelFile.Writer.CreateTemp("gather",16,8,1,true))
                 {
                     var colour=new byte[128]; Array.Fill(colour,(byte)7); var depth=new float[32]; Array.Fill(depth,2f);
@@ -304,7 +304,7 @@ namespace Patodois.RewriteLink.Tests
             ApiTests();
             T.Test("truncation after size cannot terminate the reader", () =>
             {
-                if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) { Console.WriteLine("Windows: different mapped-file semantics, Unix race test skipped"); return; }
+                if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) T.Skip("Windows has different mapped-file semantics; this is the Unix race");
                 var psi = new ProcessStartInfo(Environment.ProcessPath) { RedirectStandardOutput = true, RedirectStandardError = true };
                 if (System.IO.Path.GetFileNameWithoutExtension(Environment.ProcessPath) == "dotnet") psi.ArgumentList.Add(Assembly.GetExecutingAssembly().Location);
                 psi.ArgumentList.Add("--truncate-child");

@@ -20,7 +20,7 @@ namespace Patodois.RewriteLink.Tests
             VectorTests.Run();
             T.Cleanup();
             Console.WriteLine();
-            Console.WriteLine(T.Passed + " passed, " + T.Failed + " failed");
+            Console.WriteLine(T.Passed + " passed, " + T.Skipped + " skipped, " + T.Failed + " failed");
             return T.Failed == 0 ? 0 : 1;
         }
     }

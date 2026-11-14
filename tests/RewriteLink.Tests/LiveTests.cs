@@ -91,7 +91,7 @@ namespace Patodois.RewriteLink.Tests
                 }
             });
 
-            Test("a hello with a wrong role, an incompatible protocol, garbage or no hello gets a bye", () =>
+            Test("a hello with a wrong role, an incompatible protocol or udp_port 0, garbage, or a first line that is not a hello gets a bye", () =>
             {
                 var cases = new[]
                 {

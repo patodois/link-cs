@@ -11,7 +11,15 @@ namespace Patodois.RewriteLink.Tests
     /// <summary>A plain test runner (no dependencies): exits 1 if any test fails.</summary>
     internal static class T
     {
-        public static int Passed, Failed;
+        public static int Passed, Failed, Skipped;
+
+        private sealed class SkipException : Exception
+        {
+            public SkipException(string why) : base(why) { }
+        }
+
+        /// <summary>Ends the running test as skipped (it cannot run here), so it is neither counted nor printed as passed.</summary>
+        public static void Skip(string why) { throw new SkipException(why); }
 
         public static void Test(string name, Action body)
         {
@@ -21,6 +29,11 @@ namespace Patodois.RewriteLink.Tests
                 body();
                 Passed++;
                 Console.WriteLine("ok   " + name);
+            }
+            catch (SkipException e)
+            {
+                Skipped++;
+                Console.WriteLine("skip " + name + ": " + e.Message);
             }
             catch (Exception e)
             {

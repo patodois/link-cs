@@ -217,7 +217,11 @@ namespace Patodois.RewriteLink.Tests
             {
                 string hex = J.Str(c, "line_hex", null) ?? throw new RunnerBug("no line");
                 try { line = Control.Utf8Strict.GetString(Unhex(hex)); }
-                catch (ArgumentException) { return null; } // the reader refuses a line that is not UTF-8 before it parses it (sessions.json checks that path)
+                catch (ArgumentException)
+                {
+                    // the reader refuses a line that is not UTF-8 before it parses it (sessions.json checks that path): right only for a rejection
+                    return J.Str(c, "expect", null) == "reject" ? null : "the line is not UTF-8, which the reader refuses, but the vector expects " + J.Str(c, "expect", null);
+                }
             }
             Control parsed = null;
             string rejected = null;
@@ -637,7 +641,7 @@ namespace Patodois.RewriteLink.Tests
         {
             error = null;
             try { return PixelFile.Reader.Open(path); }
-            catch (Exception e) { error = e.GetType().Name + ": " + e.Message; return null; }
+            catch (PixelFile.FormatException e) { error = e.GetType().Name + ": " + e.Message; return null; } // the one refusal type; anything else fails the vector
         }
 
         private static void PixelReaderVectors()
@@ -670,13 +674,13 @@ namespace Patodois.RewriteLink.Tests
                     {
                         File.WriteAllBytes(path, Encoding.ASCII.GetBytes("precious"));
                         try { new PixelFile.Writer(path, width, height, slots, depth).Dispose(); return "created a writer over an existing file"; }
-                        catch (Exception) { }
+                        catch (IOException) { } // FileMode.CreateNew
                         return Encoding.ASCII.GetString(File.ReadAllBytes(path)) == "precious" ? null : "the existing file was changed";
                     }
                     case "create_fails":
                     {
                         try { new PixelFile.Writer(path, width, height, slots, depth).Dispose(); return "created a writer (" + J.Str(c, "why", "") + ")"; }
-                        catch (Exception) { }
+                        catch (ArgumentException) { } // a size outside the limits
                         return File.Exists(path) ? "failed but left a file" : null;
                     }
                 }
@@ -693,7 +697,7 @@ namespace Patodois.RewriteLink.Tests
                         ulong frame = 0;
                         string failure = null;
                         try { frame = writer.Write(rgba, d, (int)J.U32(wr["width"]), (int)J.U32(wr["height"]), J.U32(wr["camera_seq"]), J.U64(wr["time_us"])); }
-                        catch (Exception e) { failure = e.GetType().Name + ": " + e.Message; }
+                        catch (ArgumentException e) { failure = e.GetType().Name + ": " + e.Message; } // a refused write; anything else fails the vector
                         if (refused)
                         {
                             if (failure == null) return "write " + i + " was accepted as frame " + frame + " (" + J.Str(wr, "why", "") + ")";

@@ -336,7 +336,7 @@ namespace Patodois.RewriteLink.Tests
 
             Test("pixel file: a FIFO swapped in between the checks and the open is refused without blocking (Unix)", () =>
             {
-                if (Windows) return;
+                if (Windows) Skip("no FIFOs");
                 string dir = TempPath("swap"), file, fifo;
                 Directory.CreateDirectory(dir);
                 file = Path.Combine(dir, "f.frames"); fifo = Path.Combine(dir, "fifo");

@@ -260,7 +260,8 @@ in both roles, each pair twice: with the guest rendering a 320x240 frame with a 
 ## Notes and limits
 
 - Developed on macOS (arm64, .NET 8). The CI workflow builds the solution and runs the test project on Linux, macOS and
-  `windows-latest` (.NET 8 SDK). The run on `main` of 2026-11-04 passed on all three; on Windows it ran 74 checks, which include
+  `windows-latest` (.NET 8 SDK). The runner prints how many tests passed, were skipped and failed; a test that cannot run on the
+  platform (Unix file modes, FIFOs, positional I/O on Windows) is reported as skipped, not passed. On Windows what runs includes
   the live sessions in one process over loopback (Winsock, non-blocking connect), the pixel file and the shared vectors, and the
   endpoint file through a host and a guest (`File.Replace`/`File.Move`). The demo host and guest against each other
   (`tests/interop.sh`) run on Linux and macOS only; that step is skipped on Windows. **Never run on Windows:** the two-process
