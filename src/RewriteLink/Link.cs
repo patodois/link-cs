@@ -551,8 +551,7 @@ namespace Patodois.RewriteLink
                 LinesReceived++;
                 string reason;
                 bool bye;
-                if (OnLine(line, now, out reason, out bye)) { End(reason, bye); return; }
-                if (_state == State.Idle) return;
+                if (OnLine(line, now, out reason, out bye)) { End(reason, bye); return; } // only End makes the link idle
             }
             // A bye was handled above (it ends the session first), so an end of stream or a reset that follows a bye never reaches
             // this point as a failure. Neither does a write that failed since the last poll; without a bye, it ends the session here.
