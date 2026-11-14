@@ -138,7 +138,7 @@ namespace Patodois.RewriteLink
         public static EndpointInfo Read(string path)
         {
             if (string.IsNullOrEmpty(path)) throw new ArgumentException("the path is empty", "path");
-            try { return ReadChecked(path); }
+            try { return ReadChecked(path, true); }
             catch (EndpointException) { throw; }
             catch (Exception e)
             {
@@ -150,7 +150,11 @@ namespace Patodois.RewriteLink
         /// <summary>Tests only: runs between the checks on the path and the open.</summary>
         internal static Action<string> BeforeOpen;
 
-        private static EndpointInfo ReadChecked(string path)
+        /// <summary>
+        /// <paramref name="checkPermissions"/> is false only for a host looking at the file it wrote itself (<see cref="DeleteIfOwn"/>): it
+        /// decides nothing on the file's word, it only compares the port and the token with its own.
+        /// </summary>
+        private static EndpointInfo ReadChecked(string path, bool checkPermissions)
         {
             if (Directory.Exists(path)) throw new EndpointException("the endpoint file is not a regular file");
             if (!File.Exists(path)) throw new EndpointException("the endpoint file does not exist");
@@ -164,7 +168,7 @@ namespace Patodois.RewriteLink
             using (var fs = Posix.OpenReadNonBlocking(path, 4096) ?? new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
             {
                 if (!fs.CanSeek) throw new EndpointException("the endpoint file is empty or not a regular file");
-                if (Posix.IsUnix)
+                if (Posix.IsUnix && checkPermissions)
                 {
                     int mode = Posix.Permissions(fs.SafeFileHandle);
                     if (mode < 0) throw new EndpointException("cannot verify the endpoint file permissions on this runtime");
@@ -221,16 +225,18 @@ namespace Patodois.RewriteLink
         }
 
         /// <summary>
-        /// A closing host's removal: deletes the file only while it is still this host's, that is, while a guest would accept it (<see cref="Read"/>)
-        /// and it holds <paramref name="controlPort"/> and the token <paramref name="token"/> (compared in constant time). A file that another host has
-        /// written since, one that is not an endpoint file and one that cannot be read stay. Best effort, never throws.
+        /// A closing host's removal: deletes the file only while it is still this host's, that is, while it is an endpoint file that holds
+        /// <paramref name="controlPort"/> and the token <paramref name="token"/> (compared in constant time). A file that another host has written
+        /// since, one that is not an endpoint file and one that cannot be read stay. The file's permissions are not looked at here: the host
+        /// trusts nothing the file says, and on a runtime that cannot read permissions it must still be able to remove its own file. Best effort,
+        /// never throws.
         /// </summary>
         internal static bool DeleteIfOwn(string path, int controlPort, byte[] token)
         {
             if (string.IsNullOrEmpty(path) || token == null) return false;
             try
             {
-                EndpointInfo info = Read(path);
+                EndpointInfo info = ReadChecked(path, false);
                 bool samePort = info.ControlPort == controlPort;
                 bool sameToken = Tokens.Equal(Tokens.Bytes(info.Token), token);
                 if (!(samePort & sameToken)) return false;

@@ -349,6 +349,18 @@ namespace Patodois.RewriteLink.Tests
                 }
             });
 
+            Test("endpoint: a closing host removes its own file on a runtime that cannot read permissions", () =>
+            {
+                if (!Posix.IsUnix) Skip("Unix file modes");
+                string dir = NewDir(), file = Path.Combine(dir, "own.json");
+                var h = Link.Host(new LinkConfig("host") { ControlPort = 0, EndpointFile = file });
+                Check(File.Exists(file), "the host wrote its file");
+                Posix.ForceNoPermissionApi = true;
+                try { h.Close(); }
+                finally { Posix.ForceNoPermissionApi = false; }
+                Check(!File.Exists(file), "the host removed its own file");
+            });
+
             Test("a peer handed out in an event or by Peer is a copy", () =>
             {
                 using (var p = new Pair())
