@@ -168,7 +168,7 @@ namespace Patodois.RewriteLink
                 if (!fs.CanSeek) throw new EndpointException("the endpoint file is empty or not a regular file");
                 if (Posix.IsUnix)
                 {
-                    int mode = Posix.Permissions(fs.SafeFileHandle, path);
+                    int mode = Posix.Permissions(fs.SafeFileHandle);
                     if (mode < 0) throw new EndpointException("cannot verify the endpoint file permissions on this runtime");
                     if ((mode & 63) != 0) throw new EndpointException("the endpoint file's permissions allow the group or others to access it");
                 }
@@ -267,7 +267,6 @@ namespace Patodois.RewriteLink
         private static readonly MethodInfo CreateDirectoryMode = ModeType == null ? null : typeof(Directory).GetMethod("CreateDirectory", new[] { typeof(string), ModeType });
         private static readonly MethodInfo SetMode = ModeType == null ? null : typeof(File).GetMethod("SetUnixFileMode", new[] { typeof(string), ModeType });
         private static readonly MethodInfo GetModeHandle = typeof(File).GetMethod("GetUnixFileMode", new[] { typeof(SafeFileHandle) });
-        private static readonly MethodInfo GetModePath = typeof(File).GetMethod("GetUnixFileMode", new[] { typeof(string) });
         private static readonly MethodInfo MoveOverwrite = typeof(File).GetMethod("Move", new[] { typeof(string), typeof(string), typeof(bool) });
 
         [DllImport("libc", EntryPoint = "mkdir", SetLastError = true)]
@@ -379,11 +378,10 @@ namespace Patodois.RewriteLink
         }
 
         /// <summary>The permission bits (0 to 0777) of the open file, or -1 where the runtime cannot tell (before .NET 7).</summary>
-        public static int Permissions(SafeFileHandle h, string path)
+        public static int Permissions(SafeFileHandle h)
         {
             if (ForceNoPermissionApi) return -1;
             if (GetModeHandle != null) return Convert.ToInt32(Invoke(GetModeHandle, h), CultureInfo.InvariantCulture) & 511;
-            if (GetModePath != null) return Convert.ToInt32(Invoke(GetModePath, path), CultureInfo.InvariantCulture) & 511;
             return -1;
         }
     }
