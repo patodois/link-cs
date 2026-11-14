@@ -935,11 +935,8 @@ namespace Patodois.RewriteLink
         /// <summary>Sends up to the burst of queued collision chunks (32, fewer if the OS granted a small receive buffer).</summary>
         private void PumpCollision()
         {
-            for (int i = 0; i < _collisionBurst && _cqNext < _cq.Count; i++)
-            {
-                try { Send(new Wire.CollisionMsg(_cq[_cqNext++])); }
-                catch (NotConnectedException) { _cq.Clear(); _cqNext = 0; return; }
-            }
+            // Chunks are queued only while the session is live, and ending a session clears them, so Send never finds it over here.
+            for (int i = 0; i < _collisionBurst && _cqNext < _cq.Count; i++) Send(new Wire.CollisionMsg(_cq[_cqNext++]));
             if (_cqNext >= _cq.Count) { _cq.Clear(); _cqNext = 0; }
         }
 
