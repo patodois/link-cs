@@ -5,6 +5,7 @@ using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
+using System.Threading;
 using static Patodois.RewriteLink.Tests.T;
 
 namespace Patodois.RewriteLink.Tests
@@ -283,6 +284,31 @@ namespace Patodois.RewriteLink.Tests
                 }
                 Check(!File.Exists(file), "the file is gone after the host is closed");
                 Eq(Names(dir), "", "and nothing else is in the directory");
+            });
+
+            Test("endpoint: a FIFO swapped in between the checks and the open is refused without blocking (Unix)", () =>
+            {
+                if (!Posix.IsUnix) return;
+                foreach (string mode in new[] { "0600", "0644" })
+                {
+                    string dir = NewDir(), file = Path.Combine(dir, "e.json"), fifo = Path.Combine(dir, "fifo");
+                    Endpoint.Write(file, 47800, "fifo-test-token");
+                    Check(PixelTests.MakeFifo(fifo), "mkfifo");
+                    File.SetUnixFileMode(fifo, (UnixFileMode)Convert.ToInt32(mode, 8));
+                    Exception err = null;
+                    EndpointInfo got = null;
+                    Endpoint.BeforeOpen = path => File.Move(fifo, path, true);
+                    try
+                    {
+                        var th = new Thread(() => { try { got = Endpoint.Read(file); } catch (Exception e) { err = e; } }) { IsBackground = true };
+                        th.Start();
+                        bool returned = th.Join(5000);
+                        if (!returned) using (new FileStream(file, FileMode.Open, FileAccess.Write)) { } // a writer releases the blocked open
+                        Check(returned, "Read returned within 5 s (mode " + mode + ")");
+                        Check(got == null && err is EndpointException, "the FIFO is refused (mode " + mode + "): " + (err == null ? "accepted" : err.GetType().Name + ": " + err.Message));
+                    }
+                    finally { Endpoint.BeforeOpen = null; }
+                }
             });
 
             Test("endpoint: a host copies its configuration, so a reused config object cannot make it delete another file", () =>

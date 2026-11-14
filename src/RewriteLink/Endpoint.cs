@@ -158,6 +158,9 @@ namespace Patodois.RewriteLink
             }
         }
 
+        /// <summary>Tests only: runs between the checks on the path and the open.</summary>
+        internal static Action<string> BeforeOpen;
+
         private static EndpointInfo ReadChecked(string path)
         {
             if (Directory.Exists(path)) throw new EndpointException("the endpoint file is not a regular file");
@@ -167,8 +170,11 @@ namespace Patodois.RewriteLink
             if (size == 0) throw new EndpointException("the endpoint file is empty or not a regular file");
             var buf = new byte[MaxFileBytes + 1];
             int n = 0;
-            using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+            BeforeOpen?.Invoke(path);
+            // Non-blocking where libc's open can be called: a FIFO put there after the checks above is not waited on.
+            using (var fs = Posix.OpenReadNonBlocking(path, 4096) ?? new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
             {
+                if (!fs.CanSeek) throw new EndpointException("the endpoint file is empty or not a regular file");
                 if (Posix.IsUnix)
                 {
                     int mode = Posix.Permissions(fs.SafeFileHandle, path);
@@ -248,7 +254,8 @@ namespace Patodois.RewriteLink
     /// <summary>
     /// The Unix calls of <see cref="Endpoint"/>. On .NET 7+ they are the runtime's own, reached by reflection because the library targets
     /// <c>netstandard2.0</c>; everywhere else (and when a test sets <see cref="ForcePInvoke"/>) they are libc's <c>mkdir</c>, <c>chmod</c> and
-    /// <c>rename</c>, which are not variadic (the variadic <c>open</c> cannot be called through P/Invoke on Apple arm64).
+    /// <c>rename</c>. Files are never created through libc's <c>open</c>: its mode is a variadic argument, which P/Invoke cannot pass on Apple
+    /// arm64. Reading uses <c>open(path, flags)</c> (<see cref="OpenReadNonBlocking"/>), which has two named arguments and no variadic one.
     /// </summary>
     internal static class Posix
     {
@@ -279,6 +286,50 @@ namespace Patodois.RewriteLink
 
         [DllImport("libc", EntryPoint = "rename", SetLastError = true)]
         private static extern int c_rename(string from, string to);
+
+        // open(2) with its two named arguments only: the mode, a variadic argument, is read only with O_CREAT, which is never passed here.
+        [DllImport("libc", EntryPoint = "open", SetLastError = true)]
+        private static extern int c_open(string path, int flags);
+
+        /// <summary>O_RDONLY | O_NONBLOCK | O_CLOEXEC where the values are known (Linux and macOS on x86 and ARM), else 0: no native open.</summary>
+        private static readonly int ReadNonBlockingFlags = ReadFlags();
+        private static volatile bool _openUnavailable;
+
+        private static int ReadFlags()
+        {
+            if (!IsUnix) return 0;
+            Architecture a = RuntimeInformation.ProcessArchitecture;
+            if (a != Architecture.X64 && a != Architecture.Arm64 && a != Architecture.X86 && a != Architecture.Arm) return 0;
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux)) return 0x800 | 0x80000;  // O_NONBLOCK | O_CLOEXEC; O_RDONLY is 0
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX)) return 0x4 | 0x1000000;    // the same on macOS
+            return 0;
+        }
+
+        /// <summary>
+        /// Opens <paramref name="path"/> for reading with <c>O_NONBLOCK</c>, so a FIFO opens at once instead of waiting for a writer (CONTRACT.md
+        /// 6.2 and 9.6); the caller checks what it got. Null where libc's <c>open</c> cannot be called (Windows, another Unix or architecture, no
+        /// binding): the caller then opens the path as before. Throws <see cref="IOException"/> if the open fails.
+        /// </summary>
+        internal static FileStream OpenReadNonBlocking(string path, int bufferSize)
+        {
+            if (ReadNonBlockingFlags == 0 || _openUnavailable) return null;
+            int fd;
+            try { fd = c_open(path, ReadNonBlockingFlags); }
+            catch (Exception e) when (e is DllNotFoundException || e is EntryPointNotFoundException || e is BadImageFormatException || e is PlatformNotSupportedException || e is MarshalDirectiveException || e is TypeInitializationException)
+            {
+                _openUnavailable = true;
+                return null;
+            }
+            if (fd < 0)
+            {
+                int errno = Marshal.GetLastWin32Error();
+                if (errno == 2) throw new FileNotFoundException("open failed (errno 2)"); // ENOENT, 2 on Linux and macOS
+                throw new IOException("open failed (errno " + errno.ToString(CultureInfo.InvariantCulture) + ")");
+            }
+            var handle = new SafeFileHandle(new IntPtr(fd), true);
+            try { return new FileStream(handle, FileAccess.Read, bufferSize); }
+            catch { handle.Dispose(); throw; }
+        }
 
         private static bool Runtime(MethodInfo m) { return !ForcePInvoke && m != null; }
 

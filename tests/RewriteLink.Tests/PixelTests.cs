@@ -334,6 +334,29 @@ namespace Patodois.RewriteLink.Tests
                 }
             });
 
+            Test("pixel file: a FIFO swapped in between the checks and the open is refused without blocking (Unix)", () =>
+            {
+                if (Windows) return;
+                string dir = TempPath("swap"), file, fifo;
+                Directory.CreateDirectory(dir);
+                file = Path.Combine(dir, "f.frames"); fifo = Path.Combine(dir, "fifo");
+                using (var w = new PixelFile.Writer(TempPath("swap-source.frames"), 4, 2, 1, false)) File.WriteAllBytes(file, ReadAll(w.Path));
+                Check(MakeFifo(fifo), "mkfifo");
+                Exception err = null;
+                bool opened = false;
+                PixelFile.Reader.BeforeOpen = path => File.Move(fifo, path, true); // the checks saw the regular file; the open sees a FIFO
+                try
+                {
+                    var th = new Thread(() => { try { using (PixelFile.Reader.Open(file)) opened = true; } catch (Exception e) { err = e; } }) { IsBackground = true };
+                    th.Start();
+                    bool returned = th.Join(5000);
+                    if (!returned) using (new FileStream(file, FileMode.Open, FileAccess.Write)) { } // a writer releases the blocked open
+                    Check(returned, "Open returned within 5 s");
+                    Check(!opened && err is PixelFile.FormatException, "the FIFO is refused: " + (err == null ? "opened" : err.GetType().Name + ": " + err.Message));
+                }
+                finally { PixelFile.Reader.BeforeOpen = null; }
+            });
+
             Test("pixel file: every path the reader cannot look up or open is refused with FormatException", () =>
             {
                 Check(OpenRefused(Path.Combine(Path.GetTempPath(), "a\0b.frames")), "a NUL in the path");
@@ -349,6 +372,13 @@ namespace Patodois.RewriteLink.Tests
         }
 
         // ------------------------------------------------------------------ helpers
+
+        internal static bool MakeFifo(string path)
+        {
+            var mk = Process.Start(new ProcessStartInfo("mkfifo", "\"" + path + "\"") { UseShellExecute = false });
+            mk.WaitForExit();
+            return mk.ExitCode == 0 && File.Exists(path);
+        }
 
         private static byte[] ReadAll(string path)
         {

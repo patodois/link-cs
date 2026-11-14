@@ -126,12 +126,13 @@ var guest = Link.Guest(new LinkConfig("My Rewrite") { EndpointFile = path });
 
 How the file is written on `netstandard2.0`: on Unix a directory with mode 0700 is made next to the target, the temporary file is created in it, set to 0600 before the
 first byte is written, renamed over the target, and the directory is removed. On .NET 7+ the runtime's own calls do this (found by reflection); on Mono, Unity and the like,
-libc's `mkdir`, `chmod` and `rename` (not the variadic `open`, which cannot be called through P/Invoke on Apple arm64). The tests run both paths. On Windows the file is
+libc's `mkdir`, `chmod` and `rename` (not `open` with a mode, which is a variadic argument that P/Invoke cannot pass on Apple arm64). The tests run both paths. On Windows the file is
 created with `FileMode.CreateNew` beside the target and moved over it (`File.Replace`, or `File.Move` if the target is new, with a tiny window in between): the per-user ACL of
 the directory (`%LOCALAPPDATA%`) is what keeps others out. The Windows path runs in CI on `windows-latest`: a host with an endpoint file writes it, a guest reads it and closing deletes it, and the endpoint vectors pass there (43 cases, 4 of them skip themselves on Windows: file modes and a FIFO). The test of the write and read round trip with the runtime's calls and with libc's is Unix only, and no test checks the directory's ACL.
 
 The reader's permission check (`mode & 077`) uses `File.GetUnixFileMode`, available from .NET 7. Unix runtimes without either permission API refuse endpoint files rather than trust an unverifiable token. This includes older Mono/Unity/.NET runtimes; applications there can still supply an explicit port and token through their own trusted configuration. Like the pixel
-reader, it tells a FIFO or device from a regular file by its size 0 before opening (a peer that swaps the file after the check can still get through).
+reader, it tells a FIFO or device from a regular file by its size 0 before opening, and on Linux and macOS it opens the file with
+`O_NONBLOCK`, so a FIFO put there after the check is refused instead of blocking the guest (see "Regular file check" below).
 
 ## Contract revision 5 (and 4)
 
@@ -168,8 +169,12 @@ What .NET cannot do, and what is done instead:
 
 - **Regular file check.** There is no `lstat`/`fstat` and no non-blocking open in `netstandard2.0`. The reader refuses a symlink or
   directory by its attributes and a FIFO, device or socket by its size (0, where a pixel file needs at least 64 bytes), all before
-  opening the file, so opening something that waits for a writer is never tried. A peer that swaps the file between the check and the
-  open can still get through, as with link-java; the contract asks for `O_NONBLOCK` and a device/inode comparison where there are any.
+  opening the file. On Linux and macOS (x86 and ARM) it then opens the file with libc's `open(path, O_RDONLY | O_NONBLOCK)`: a call
+  with two named arguments, not the variadic mode argument that P/Invoke cannot pass on Apple arm64. A FIFO that a peer swaps in
+  between the check and the open therefore opens at once and is refused because it cannot seek, and a device fails the length check;
+  a test swaps one in at that moment. Elsewhere, or where the runtime cannot bind `open`, the file is opened as before, and a FIFO
+  swapped in at that moment blocks the calling thread until a writer opens it. There is still no device/inode comparison of the
+  handle with the path (the contract asks for one where there is `fstat`), so a regular file swapped in is read and checked like any other.
 - **Seqlock ordering** is explained in the comment at the top of `PixelFile.cs`: `Volatile.Read` (acquire) and `Volatile.Write`
   (release), and `Thread.MemoryBarrier()` (a full fence, stronger than the contract's acquire and release fences) where the contract has a
   fence. 64-bit processes only (a 64-bit access to the lock word is atomic there); `PixelFile` throws on a big-endian machine.

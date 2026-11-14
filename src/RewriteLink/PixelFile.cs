@@ -203,9 +203,11 @@ namespace Patodois.RewriteLink
             /// Opens and checks the file as section 9.6 says: an absolute path to a regular file (a symlink, a directory, a FIFO, a device
             /// or a socket is refused), the header limits and checked arithmetic of <see cref="Validate"/>. The type is checked before the
             /// file is opened: a symlink or directory by its attributes, and a FIFO, device or socket by its size, which is 0 where a pixel
-            /// file needs at least 64 bytes, so opening one (which waits for a writer for ever) is never tried. .NET has no non-blocking open
-            /// and no fstat to compare with, so a peer that swaps the file after the check can still get through; the contract asks for
-            /// O_NONBLOCK and an inode comparison where the language has them.
+            /// file needs at least 64 bytes. On Linux and macOS the file is then opened with libc's <c>open(path, O_RDONLY | O_NONBLOCK)</c>, so a
+            /// FIFO that a peer swaps in after the checks opens at once and is refused (it cannot seek), instead of blocking the caller until a
+            /// writer comes; a device swapped in fails the length check. Where that call is not available (another Unix, a runtime without the
+            /// binding) the file is opened as before, and a FIFO swapped in between the check and the open blocks the calling thread. There is no
+            /// fstat in <c>netstandard2.0</c>, so the inode the contract compares is not: a regular file swapped in is read and validated like any.
             /// </summary>
             /// <exception cref="FormatException">The path or the file is refused, including every error of looking it up and opening it (a
             /// missing file, a path the runtime cannot take, no permission).</exception>
@@ -260,13 +262,21 @@ namespace Patodois.RewriteLink
                 }
             }
 
+            /// <summary>Tests only: runs between the checks on the path and the open.</summary>
+            internal static Action<string> BeforeOpen;
+
             /// <summary>The checks on the path, then the open: one refusal type for every way a peer-named path can fail.</summary>
             private static FileStream OpenChecked(string path)
             {
                 FileAttributes attrs = File.GetAttributes(path);
                 if ((attrs & (FileAttributes.Directory | FileAttributes.ReparsePoint | FileAttributes.Device)) != 0) throw new FormatException("not a regular file: " + path);
                 if (new FileInfo(path).Length < HeaderLen) throw new FormatException("not a pixel file (or not a regular file): " + path);
-                return new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 1);
+                BeforeOpen?.Invoke(path);
+                FileStream fs = Posix.OpenReadNonBlocking(path, 1);
+                if (fs == null) return new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 1);
+                // The path may name something else now: a FIFO or a socket cannot seek; a device or an empty file fails the length check after this.
+                if (!fs.CanSeek) { fs.Dispose(); throw new FormatException("not a regular file: " + path); }
+                return fs;
             }
 
             /// <summary>Presentation copy: only a valid slot advances order within this file.
