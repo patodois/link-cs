@@ -56,6 +56,7 @@ namespace Patodois.RewriteLink
         public sealed class FormatException : IOException
         {
             public FormatException(string m) : base(m) { }
+            internal FormatException(string m, Exception inner) : base(m, inner) { }
         }
 
         /// <summary>The numbers of a validated file header.</summary>
@@ -203,16 +204,19 @@ namespace Patodois.RewriteLink
             /// and no fstat to compare with, so a peer that swaps the file after the check can still get through; the contract asks for
             /// O_NONBLOCK and an inode comparison where the language has them.
             /// </summary>
+            /// <exception cref="FormatException">The path or the file is refused, including every error of looking it up and opening it (a
+            /// missing file, a path the runtime cannot take, no permission).</exception>
             /// <exception cref="PlatformNotSupportedException">The process is not 64-bit or the machine is not little-endian.
             /// No file is opened and no native pixel I/O is attempted in that case.</exception>
             public static Reader Open(string path)
             {
                 RequireLittleEndian();
                 if (!IsAbsoluteHere(path)) throw new FormatException("the pixel file path is not absolute: " + path);
-                FileAttributes attrs = File.GetAttributes(path);
-                if ((attrs & (FileAttributes.Directory | FileAttributes.ReparsePoint | FileAttributes.Device)) != 0) throw new FormatException("not a regular file: " + path);
-                if (new FileInfo(path).Length < HeaderLen) throw new FormatException("not a pixel file (or not a regular file): " + path);
-                FileStream fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 1);
+                FileStream fs;
+                try { fs = OpenChecked(path); }
+                catch (FormatException) { throw; }
+                catch (PlatformNotSupportedException) { throw; }
+                catch (Exception e) { throw new FormatException("cannot open the pixel file (" + e.GetType().Name + ": " + e.Message + "): " + path, e); }
                 MemoryMappedFile mmf = null;
                 MemoryMappedViewAccessor view = null;
                 bool acquired = false;
@@ -251,6 +255,15 @@ namespace Patodois.RewriteLink
                     fs.Dispose();
                     throw;
                 }
+            }
+
+            /// <summary>The checks on the path, then the open: one refusal type for every way a peer-named path can fail.</summary>
+            private static FileStream OpenChecked(string path)
+            {
+                FileAttributes attrs = File.GetAttributes(path);
+                if ((attrs & (FileAttributes.Directory | FileAttributes.ReparsePoint | FileAttributes.Device)) != 0) throw new FormatException("not a regular file: " + path);
+                if (new FileInfo(path).Length < HeaderLen) throw new FormatException("not a pixel file (or not a regular file): " + path);
+                return new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 1);
             }
 
             /// <summary>Presentation copy: only a valid slot advances order within this file.

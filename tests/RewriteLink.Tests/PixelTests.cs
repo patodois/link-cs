@@ -313,6 +313,13 @@ namespace Patodois.RewriteLink.Tests
                 Check(!PixelFile.IsAbsolute("C:x", true) && !PixelFile.IsAbsolute("\\x", true) && !PixelFile.IsAbsolute("x\\y", true) && !PixelFile.IsAbsolute("", true), "windows relative");
             });
 
+            Test("pixel file: every path the reader cannot look up or open is refused with FormatException", () =>
+            {
+                Check(OpenRefused(Path.Combine(Path.GetTempPath(), "a\0b.frames")), "a NUL in the path");
+                Check(OpenRefused(Path.Combine(Path.GetTempPath(), "link-cs-no-such-dir-" + Guid.NewGuid().ToString("N"), "x.frames")), "a missing directory");
+                Check(OpenRefused(TempPath("missing.frames")), "a missing file");
+            });
+
             Test("pixel file: the seqlock under contention, a writer thread against a reader thread, a torn copy is never accepted", () =>
             {
                 Contention(true);
