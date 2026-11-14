@@ -259,6 +259,7 @@ namespace Patodois.RewriteLink
         /// <summary>Tests only: which path the last call took, "runtime" or "libc".</summary>
         public static volatile string LastPath = "";
 
+        /// <summary>Not Windows: the one platform test of the library (the link, the endpoint file and the pixel file use it).</summary>
         public static readonly bool IsUnix = Environment.OSVersion.Platform != PlatformID.Win32NT && Environment.OSVersion.Platform != PlatformID.Win32Windows
             && Environment.OSVersion.Platform != PlatformID.Win32S && Environment.OSVersion.Platform != PlatformID.WinCE;
 

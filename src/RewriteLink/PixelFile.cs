@@ -34,7 +34,7 @@ namespace Patodois.RewriteLink
     /// </summary>
     public static unsafe class PixelFile
     {
-        private static bool IsWindows { get { return Path.DirectorySeparatorChar == '\\'; } }
+        private static bool IsWindows { get { return !Posix.IsUnix; } }
         public const int HeaderLen = 64;
         public const int SlotHeaderLen = 64;
         public const uint FormatRgba8 = 1;
@@ -88,7 +88,7 @@ namespace Patodois.RewriteLink
             return path.Length >= 2 && (path[0] == '\\' || path[0] == '/') && (path[1] == '\\' || path[1] == '/');
         }
 
-        private static bool IsAbsoluteHere(string path) { return IsAbsolute(path, System.IO.Path.DirectorySeparatorChar == '\\'); }
+        private static bool IsAbsoluteHere(string path) { return IsAbsolute(path, IsWindows); }
 
         /// <summary>
         /// Checks a pixel file header against the file's length, as revision 4 and 5 say: the limits come first (width and height 1 to 16384,

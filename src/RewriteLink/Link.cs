@@ -300,7 +300,7 @@ namespace Patodois.RewriteLink
                 try { u.ReceiveBufferSize = Wire.RecvBufferBytes; } catch (SocketException) { }
                 u.Bind(new IPEndPoint(IPAddress.Loopback, cfg.UdpPort));
                 u.Blocking = false;
-                if (Environment.OSVersion.Platform == PlatformID.Win32NT)
+                if (!Posix.IsUnix)
                 {
                     // ICMP port-unreachable from an earlier send must not make ReceiveFrom fail (SIO_UDP_CONNRESET off)
                     try { u.IOControl(-1744830452, new byte[] { 0, 0, 0, 0 }, null); } catch (Exception) { }
