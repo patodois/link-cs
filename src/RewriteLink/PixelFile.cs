@@ -622,14 +622,17 @@ namespace Patodois.RewriteLink
                 foreach (char c in tag ?? "")
                     clean.Append((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_' ? c : '_');
                 var rnd = new byte[4];
-                for (int attempt = 0; attempt < 64; attempt++)
+                using (var rng = RandomNumberGenerator.Create())
                 {
-                    using (var rng = RandomNumberGenerator.Create()) rng.GetBytes(rnd);
-                    string name = "rewrite-bridge-" + System.Diagnostics.Process.GetCurrentProcess().Id + "-" + clean + "-" + Wire.Get32(rnd, 0).ToString("x8") + ".frames";
-                    try { return new Writer(System.IO.Path.Combine(System.IO.Path.GetTempPath(), name), width, height, slots, withDepth); }
-                    catch (IOException) when (attempt < 63) { }
+                    // 64 attempts: the 64th one's IOException goes to the caller.
+                    for (int attempt = 0; ; attempt++)
+                    {
+                        rng.GetBytes(rnd);
+                        string name = "rewrite-bridge-" + System.Diagnostics.Process.GetCurrentProcess().Id + "-" + clean + "-" + Wire.Get32(rnd, 0).ToString("x8") + ".frames";
+                        try { return new Writer(System.IO.Path.Combine(System.IO.Path.GetTempPath(), name), width, height, slots, withDepth); }
+                        catch (IOException) when (attempt < 63) { }
+                    }
                 }
-                throw new IOException("no free pixel file name");
             }
 
             private static long Round64(long v) { return (v + 63) & ~63L; }
