@@ -732,7 +732,8 @@ namespace Patodois.RewriteLink
                 {
                     int kind;
                     h = Wire.DecodeHeader(_rx, len, out kind);
-                    if (h.Session != _peer.Session || h.Version != _peer.Protocol) { Foreign++; continue; }
+                    // DecodeHeader has refused every version but the one this library speaks, which is the session's.
+                    if (h.Session != _peer.Session) { Foreign++; continue; }
                     d = Wire.Decode(_rx, len);
                 }
                 catch (WireException) { Malformed++; continue; }
