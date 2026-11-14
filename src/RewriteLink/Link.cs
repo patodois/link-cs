@@ -259,6 +259,10 @@ namespace Patodois.RewriteLink
             _cfg = cfg;
             Tokens.CheckConfigured(cfg.Token, "Token");
             if (cfg.EndpointFile != null && cfg.EndpointFile.Length == 0) throw new ArgumentException("the endpoint file path is empty", "EndpointFile");
+            if (cfg.ControlPort < 0 || cfg.ControlPort > 65535) throw new ArgumentException("the control port must be 0 to 65535", "ControlPort");
+            if (cfg.UdpPort < 0 || cfg.UdpPort > 65535) throw new ArgumentException("the UDP port must be 0 to 65535", "UdpPort");
+            if (cfg.TimeoutMs < 0) throw new ArgumentException("the timeout must not be negative", "TimeoutMs");
+            if (cfg.ReconnectMs < 0) throw new ArgumentException("the reconnect delay must not be negative", "ReconnectMs");
             _helloToken = cfg.Token;
             _heartbeatMs = Math.Max(Wire.MinHeartbeatMs, Math.Min(Wire.MaxHeartbeatMs, cfg.HeartbeatMs));
             _nextTry = Now();

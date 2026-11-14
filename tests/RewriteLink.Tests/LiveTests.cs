@@ -330,6 +330,24 @@ namespace Patodois.RewriteLink.Tests
                 }
             });
 
+            Test("a port outside 0..65535 or a negative timeout or reconnect delay is refused when the link is created", () =>
+            {
+                var bad = new Dictionary<string, Action<LinkConfig>>
+                {
+                    { "control port 70000", c => c.ControlPort = 70000 }, { "control port -1", c => c.ControlPort = -1 },
+                    { "UDP port 65536", c => c.UdpPort = 65536 }, { "UDP port -1", c => c.UdpPort = -1 },
+                    { "timeout -1", c => c.TimeoutMs = -1 }, { "reconnect delay -1", c => c.ReconnectMs = -1 },
+                };
+                foreach (var kv in bad)
+                    foreach (bool host in new[] { true, false })
+                    {
+                        var cfg = new LinkConfig("bad") { ControlPort = host ? 0 : 1 };
+                        kv.Value(cfg);
+                        Throws<ArgumentException>(() => (host ? Link.Host(cfg) : Link.Guest(cfg)).Dispose(), kv.Key + (host ? " (host)" : " (guest)"));
+                    }
+                using (var g = Link.Guest(new LinkConfig("edge") { ControlPort = 65535, UdpPort = 0, TimeoutMs = 0, ReconnectMs = 0 })) g.Poll();
+            });
+
             Test("the link clock keeps counting milliseconds after 107 days of stopwatch ticks", () =>
             {
                 using (var g = Link.Guest(new LinkConfig("clock") { ControlPort = 1 }))
