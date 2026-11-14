@@ -82,7 +82,7 @@ namespace Patodois.RewriteLink
             string dir = Path.GetDirectoryName(full), name = Path.GetFileName(full);
             if (string.IsNullOrEmpty(dir) || string.IsNullOrEmpty(name)) throw new EndpointException("cannot write the endpoint file: not a file path");
             if (!Directory.Exists(dir)) throw new EndpointException("cannot write the endpoint file: the directory does not exist"); // none is created
-            string stem = "." + name + "." + Process.GetCurrentProcess().Id.ToString(CultureInfo.InvariantCulture) + "." + RandomHex(8);
+            string stem = "." + name + "." + Process.GetCurrentProcess().Id.ToString(CultureInfo.InvariantCulture) + "." + Tokens.RandomHex(8);
             string tmpName = stem + ".tmp";
             if (!Posix.IsUnix)
             {
@@ -124,15 +124,6 @@ namespace Patodois.RewriteLink
 
         private static void TryDelete(string file) { try { File.Delete(file); } catch (Exception) { } }
         private static void TryDeleteDir(string dir) { try { Directory.Delete(dir); } catch (Exception) { } }
-
-        private static string RandomHex(int bytes)
-        {
-            var b = new byte[bytes];
-            using (var rng = RandomNumberGenerator.Create()) rng.GetBytes(b);
-            var s = new StringBuilder(bytes * 2);
-            foreach (byte x in b) s.Append(x.ToString("x2", CultureInfo.InvariantCulture));
-            return s.ToString();
-        }
 
         // ------------------------------------------------------------------------------------------ reading
 

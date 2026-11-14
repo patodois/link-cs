@@ -19,11 +19,14 @@ namespace Patodois.RewriteLink
         /// A new token: 32 bytes from the operating system's cryptographic random number generator (<see cref="RandomNumberGenerator"/>),
         /// as 64 lowercase hex digits. A failure of the generator throws; there is no fallback to a weaker source.
         /// </summary>
-        public static string Generate()
+        public static string Generate() { return RandomHex(32); }
+
+        /// <summary><paramref name="bytes"/> bytes of the operating system's CSPRNG as lowercase hex digits.</summary>
+        internal static string RandomHex(int bytes)
         {
-            var b = new byte[32];
+            var b = new byte[bytes];
             using (var rng = RandomNumberGenerator.Create()) rng.GetBytes(b);
-            var s = new StringBuilder(64);
+            var s = new StringBuilder(bytes * 2);
             foreach (byte x in b) s.Append(x.ToString("x2", CultureInfo.InvariantCulture));
             return s.ToString();
         }
