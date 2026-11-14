@@ -313,6 +313,27 @@ namespace Patodois.RewriteLink.Tests
                 Check(!PixelFile.IsAbsolute("C:x", true) && !PixelFile.IsAbsolute("\\x", true) && !PixelFile.IsAbsolute("x\\y", true) && !PixelFile.IsAbsolute("", true), "windows relative");
             });
 
+            Test("pixel file: a file longer than its slots reads, and a Windows reader maps only what the header needs", () =>
+            {
+                string src = TempPath("short.frames"), longer = TempPath("longer.frames");
+                long need;
+                using (var w = new PixelFile.Writer(src, 4, 2, 3, false))
+                {
+                    w.Write(Enumerable.Range(0, 32).Select(i => (byte)i).ToArray(), null, 4, 2, 0, 1);
+                    byte[] bytes = ReadAll(src);
+                    need = bytes.Length;
+                    using (var f = new FileStream(longer, FileMode.CreateNew, FileAccess.Write)) { f.Write(bytes, 0, bytes.Length); f.SetLength(need + (1 << 20)); }
+                }
+                using (var r = PixelFile.Reader.Open(longer))
+                {
+                    var frame = r.ReadLatest(new Wire.FrameReady(1, 1, 0, 4, 2), false);
+                    Check(frame != null && frame.Rgba[31] == 31, "the frame reads");
+                    var view = (MemoryMappedViewAccessor)typeof(PixelFile.Reader).GetField("_view", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic).GetValue(r);
+                    if (Windows) Check(view.Capacity >= need && view.Capacity < need + 65536, "the view covers the header and the slots, not the 1 MiB tail: " + view.Capacity);
+                    else Check(view == null, "Unix readers map nothing");
+                }
+            });
+
             Test("pixel file: every path the reader cannot look up or open is refused with FormatException", () =>
             {
                 Check(OpenRefused(Path.Combine(Path.GetTempPath(), "a\0b.frames")), "a NUL in the path");

@@ -289,7 +289,9 @@ namespace Patodois.RewriteLink.Tests
                         T.Check(ar.ReadLatest(old,false)!=null && br.ReadLatest(old,true)==null,"old file announcement is not a current frame");
                         var f=br.ReadLatest(first,false);
                         T.Check(f!=null && f.Depth==null,"new file starts at 1 and depth can be skipped");
+                        long otherBefore=br.SkippedOtherFrame;
                         T.Check(br.ReadLatest(first,true)==null && br.SkippedStale==1,"duplicate counted");
+                        T.Check(br.SkippedOtherFrame==otherBefore,"a duplicate counts as stale only, not as another frame");
                         long count=br.SkippedOtherFrame;
                         T.Check(br.ReadLatest(null,false)==null && br.SkippedOtherFrame==count,"null is a miss without counters");
                     }

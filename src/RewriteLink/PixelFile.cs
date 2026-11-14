@@ -66,6 +66,8 @@ namespace Patodois.RewriteLink
             public long SlotSize;
             public uint DepthFormat;
             public long DepthStride, DepthOffset;
+            /// <summary>The bytes the header and the slots take: 64 + slots * slot_size, at most the file's length.</summary>
+            public long Need;
         }
 
         internal static int ProcessPointerSize = IntPtr.Size;
@@ -102,6 +104,7 @@ namespace Patodois.RewriteLink
             ulong slotSize = Wire.Get64(h, 32);
             uint depthFormat = Wire.Get32(h, 40), depthStride = Wire.Get32(h, 44);
             ulong depthOffset = Wire.Get64(h, 48);
+            ulong need;
             if (version != 1) throw new FormatException("pixel file version " + version);
             if (slots < 1 || slots > 16) throw new FormatException("slots " + slots);
             if (w < 1 || ht < 1 || w > Wire.MaxFrameDim || ht > Wire.MaxFrameDim) throw new FormatException("size " + w + "x" + ht);
@@ -116,7 +119,7 @@ namespace Patodois.RewriteLink
                     // pass an unchecked length test.
                     ulong colourEnd = SlotHeaderLen + (ulong)stride * ht;
                     if (slotSize % 64 != 0 || slotSize < colourEnd) throw new FormatException("slot_size " + slotSize);
-                    ulong need = HeaderLen + (ulong)slots * slotSize;
+                    need = HeaderLen + (ulong)slots * slotSize;
                     if (need > (ulong)size) throw new FormatException("file is shorter than its slots");
                     if (depthFormat == DepthLinearF32)
                     {
@@ -138,7 +141,7 @@ namespace Patodois.RewriteLink
             return new Layout
             {
                 Slots = (int)slots, Width = (int)w, Height = (int)ht, Stride = (int)stride, SlotSize = (long)slotSize,
-                DepthFormat = depthFormat, DepthStride = depthStride, DepthOffset = (long)depthOffset,
+                DepthFormat = depthFormat, DepthStride = depthStride, DepthOffset = (long)depthOffset, Need = (long)need,
             };
         }
 
@@ -238,7 +241,7 @@ namespace Patodois.RewriteLink
                     {
                         // An active Windows mapping prevents ordinary file truncation.
                         mmf = MemoryMappedFile.CreateFromFile(fs, null, 0, MemoryMappedFileAccess.Read, HandleInheritability.None, true);
-                        view = mmf.CreateViewAccessor(0, size, MemoryMappedFileAccess.Read);
+                        view = mmf.CreateViewAccessor(0, l.Need, MemoryMappedFileAccess.Read); // what the header needs, not a longer file's tail
                         view.SafeMemoryMappedViewHandle.AcquirePointer(ref p);
                         acquired = true;
                         p += view.PointerOffset;
@@ -272,7 +275,7 @@ namespace Patodois.RewriteLink
             public Frame ReadLatest(Wire.FrameReady ready, bool wantDepth)
             {
                 if (ready == null) return null;
-                if (ready.Frame != 0 && ready.Frame <= _newest) { SkippedStale++; SkippedOtherFrame++; return null; }
+                if (ready.Frame != 0 && ready.Frame <= _newest) { SkippedStale++; return null; }
                 Frame f = Read(ready, wantDepth);
                 if (f != null) _newest = f.Number;
                 return f;
