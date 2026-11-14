@@ -874,8 +874,10 @@ namespace Patodois.RewriteLink
         private void SendHeartbeat()
         {
             if (!CanSend) return; // a control write failed: this poll ends the session
-            try { Send(new Wire.HeartbeatMsg()); } catch (WireException) { }
+            Send(Heartbeat); // a heartbeat has no field to refuse: EncodeInto cannot throw for it
         }
+
+        private static readonly Wire.HeartbeatMsg Heartbeat = new Wire.HeartbeatMsg();
 
         /// <summary>Sends the camera; returns the datagram's seq (a guest quotes it in <see cref="Wire.FrameReady.CameraSeq"/>).</summary>
         public uint SendCamera(Wire.Camera camera)
