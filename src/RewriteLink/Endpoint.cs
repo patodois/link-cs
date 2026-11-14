@@ -143,9 +143,7 @@ namespace Patodois.RewriteLink
             catch (Exception e)
             {
                 if (e is FileNotFoundException || e is DirectoryNotFoundException) throw new EndpointException("the endpoint file does not exist");
-                if (e is IOException || e is UnauthorizedAccessException || e is NotSupportedException || e is System.Security.SecurityException || e is ArgumentException)
-                    throw new EndpointException("cannot read the endpoint file: " + e.GetType().Name);
-                throw new EndpointException("cannot read the endpoint file (" + e.GetType().Name + ")");
+                throw new EndpointException("cannot read the endpoint file: " + e.GetType().Name); // the type only: never the contents
             }
         }
 
