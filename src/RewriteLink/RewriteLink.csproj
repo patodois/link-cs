@@ -1,7 +1,9 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <!-- netstandard2.0 loads in Unity (Mono and IL2CPP), BepInEx, MelonLoader, .NET Framework 4.6.1+ and .NET -->
+    <!-- netstandard2.0: the profile that .NET Framework 4.6.1+, Mono, Unity and .NET load. CI runs it on .NET 8 only; nothing has been
+         run in Unity, BepInEx or MelonLoader (see the README). PixelFile needs a 64-bit process, and endpoint files are refused on Unix
+         runtimes without a permission API. -->
     <TargetFramework>netstandard2.0</TargetFramework>
     <LangVersion>7.3</LangVersion>
     <AssemblyName>RewriteLink</AssemblyName>

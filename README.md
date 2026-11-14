@@ -8,7 +8,9 @@ each other (see "Interop"). The API has the shape of link-java's `Link`.
 **Adding this to a game.** Read the [guide to adding a game](https://github.com/patodois/rewrite-bridge/blob/main/docs/INTEGRATING.md) first: it says whether to build a host or a guest, and has a host loop and a guest loop built against this library and run against rewrite-bridge's `fake_host` and `fake_guest`. Build the DLL with `dotnet build RewriteLink.sln -c Release` and reference it; there is no NuGet package. Not run inside BepInEx or MelonLoader.
 
 - `netstandard2.0`, so it loads in .NET Framework 4.6.1 and later, Mono, .NET and Unity's .NET Standard 2.0 profile.
-  C# 7.3 language level, **no dependencies beyond the BCL**: sockets, `MemoryMappedFile`, `Volatile`, `Thread.MemoryBarrier`.
+  C# 7.3 language level, **no package dependencies**: the BCL (sockets, `MemoryMappedFile`, `Volatile`, `Thread.MemoryBarrier`) and, on Unix,
+  libc through P/Invoke: `pread`, `preadv` and a read-only `open` for the readers (with managed fallbacks when the binding is missing), and
+  `mkdir`, `chmod` and `rename` for the endpoint file on runtimes without the .NET 7 calls.
 - Everything binds and connects to `127.0.0.1` only. No threads are created: you call `Poll()`.
 - The only `unsafe` code is in `PixelFile` (mapped writer/Windows pointers and pinned Unix I/O buffers).
 - Licence: MIT OR Apache-2.0.
@@ -87,7 +89,7 @@ guest.Close();
 | `Poll()`, `Poll(List<LinkEvent>)` | **Never blocks.** Handshake, reads both channels, heartbeats, at most 32 collision chunks, the watchdog. The second form appends to your list, so a frame loop allocates no list. |
 | `SendCamera`, `SendPoses`, `SendCollision`, `SendFrame` | State datagrams. `SendCollision` takes 9 floats per triangle, copies them and queues the chunks (paced; a newer snapshot replaces the queued one); more than `Wire.MaxCollisionChunks` (4096) chunks, 925696 triangles, throws `ArgumentException` before anything is copied. `SendCamera` returns the `seq` a guest quotes in `FrameReady.CameraSeq`. |
 | `Spawn`, `Despawn`, `SetFocus`, `AnnounceFrames` | Control messages. |
-| `Disconnect(reason)`, `Close()` / `Dispose()` | `bye`, half-close, drain (CONTRACT 6.1). `Disconnect` does not block; `Close` may block for up to about 250 ms. |
+| `Disconnect(reason)`, `Close()` / `Dispose()` | `bye`, half-close, drain (CONTRACT 6.1). `Disconnect` ends the session and does not block; a guest then connects again by itself after `ReconnectMs`, and a host takes the next guest, so to stay disconnected call `Close`. `Close` may block for up to about 250 ms. |
 | `IsConnected`, `Peer`, `Focus`, `ControlPort`, `UdpPort`, `Malformed`, `Stale`, `Foreign`, `UnknownEntity`, `SpawnIgnored`, `SendDropped`, `DatagramsSent/Received`, `LinesSent/Received` | State and statistics. |
 | `Tokens.Generate()` / `Link.GenerateToken()`, `Tokens.Equal(byte[], byte[])` | Revision 6: a new token (32 bytes of the OS CSPRNG as 64 lowercase hex digits), and the contract's constant-time comparison. |
 | `Endpoint.Write(path, controlPort, token)`, `Endpoint.Read(path)` (an `EndpointInfo` with `ControlPort` and `Token`), `Endpoint.Delete(path)` | Revision 6: the endpoint file as a launcher or a test would use it. `Write` and `Read` throw `EndpointException` (the message never contains the token or the file's contents). |
@@ -95,7 +97,8 @@ guest.Close();
 | `Wire`, `Control`, `Quat` | The codecs and small helpers in the link's conventions (right-handed, +Y up, +Z front). |
 
 Events are `LinkEvent.Connected`, `Lost`, `HandshakeFailed`, `Camera`, `Poses`, `Collision`, `Frame`, `Spawn`, `Despawn`,
-`Focus`, `FrameChannel`. Every public method takes the link's lock, so a game thread can send while a helper thread polls.
+`Focus`, `FrameChannel`. Every public method of `Link` takes the link's lock, so a game thread can send while a helper thread polls.
+`PixelFile.Reader` is not thread-safe: use one reader per thread (`PixelFile.Writer` is, but one thread should do the writing).
 Sending without a session throws `NotConnectedException`. One `Poll` can return an event and then `Lost` in the same batch (the peer's
 line and its `bye` arrived together), so the session may already be over when you look at an event: answer an event only while
 `IsConnected` is true, as the samples above do. A value the contract forbids throws `WireException`, and so do a required
@@ -131,7 +134,7 @@ How the file is written on `netstandard2.0`: on Unix a directory with mode 0700 
 first byte is written, renamed over the target, and the directory is removed. On .NET 7+ the runtime's own calls do this (found by reflection); on Mono, Unity and the like,
 libc's `mkdir`, `chmod` and `rename` (not `open` with a mode, which is a variadic argument that P/Invoke cannot pass on Apple arm64). The tests run both paths. On Windows the file is
 created with `FileMode.CreateNew` beside the target and moved over it (`File.Replace`, or `File.Move` if the target is new, with a tiny window in between): the per-user ACL of
-the directory (`%LOCALAPPDATA%`) is what keeps others out. The Windows path runs in CI on `windows-latest`: a host with an endpoint file writes it, a guest reads it and closing deletes it, and the endpoint vectors pass there (43 cases, 4 of them skip themselves on Windows: file modes and a FIFO). The test of the write and read round trip with the runtime's calls and with libc's is Unix only, and no test checks the directory's ACL.
+the directory (`%LOCALAPPDATA%`) is what keeps others out. The Windows path runs in CI on `windows-latest`: a host with an endpoint file writes it, a guest reads it and closing deletes it, and the endpoint vectors pass there (47 cases, 4 of them skip themselves on Windows: file modes and a FIFO). The test of the write and read round trip with the runtime's calls and with libc's is Unix only, and no test checks the directory's ACL.
 
 The reader's permission check (`mode & 077`) uses `File.GetUnixFileMode`, available from .NET 7. Unix runtimes without either permission API refuse endpoint files rather than trust an unverifiable token. This includes older Mono/Unity/.NET runtimes; applications there can still supply an explicit port and token through their own trusted configuration. Like the pixel
 reader, it tells a FIFO or device from a regular file by its size 0 before opening, and on Linux and macOS it opens the file with
@@ -163,10 +166,11 @@ Revision 4, all of it implemented, each rule with a test that fails without it:
 - the pixel file reader: an absolute path to a regular file, width and height at most 16384, at most 2^26 pixels,
   `stride == width * 4`, checked arithmetic for every size, a length check before each read and bounded Unix positional I/O (revision 7); the
   writer: created with `FileMode.CreateNew`, never resized or truncated, the same limits, deleted at the end;
-- control lines of at most 65536 bytes, strict UTF-8, and a JSON reader that accepts exactly what Rust's `serde_json`
-  accepts (the same corpus as link-java and link-c; number ranges are decided on the digits, so the answer does not depend on
+- control lines of at most 65536 bytes, strict UTF-8, and a JSON reader that agrees with Rust's `serde_json` on every case of the
+  shared corpus (the same corpus as link-java and link-c; nothing outside it has been compared; number ranges are decided on the digits, so the answer does not depend on
   the runtime's `double.Parse`);
-- after `bye`: half-close, drain for at most 200 ms, close; a received `bye` wins over the reset that follows it.
+- after `bye`: half-close, drain for at most 200 ms, close; a received `bye` wins over the reset that follows it (the test of this
+  runs on Linux and macOS: on Windows a reset discards the unread `bye`, as the contract says).
 
 What .NET cannot do, and what is done instead:
 
@@ -214,8 +218,8 @@ dotnet run --project tests/RewriteLink.Tests -c Release       # a plain console 
 The tests are the C# port of link-java's and link-c's: the worked example of CONTRACT.md section 11 byte for byte, the codecs, a fuzz of
 malformed datagrams (20000 random buffers, every prefix of every valid one, 20000 mutations: only `WireException` may come out) and of
 100000 mutated control lines, 30000 junk datagrams at a live host, the JSON corpus, live sessions over loopback, every revision 4 and 5 case, and
-the seqlock under contention (a writer thread lapping a two-slot file against a reader thread; the same copy without the lock check does
-tear, and the seqlock reader accepts no torn frame), the revision 6 token and endpoint file (constant-time comparison, generation, writing and reading with
+the seqlock under contention (a writer thread lapping a two-slot file against a reader thread: the seqlock reader accepts no torn frame,
+which is asserted; the same copy without the lock check is run alongside and the torn copies it gets are printed, not asserted), the revision 6 token and endpoint file (constant-time comparison, generation, writing and reading with
 both the runtime's calls and libc's, a live host and guest through an endpoint file, a restarted host, secrecy), and the shared test vectors (see below).
 
 ## Shared test vectors
