@@ -63,6 +63,7 @@ while (running)
     guest.Poll(events);
     foreach (var e in events)
     {
+        if (!guest.IsConnected) continue;                // the batch may end with Lost: answer nothing after it
         if (e is LinkEvent.Connected) guest.Spawn(1, "My Rewrite", "demo/cube", "Cube");
         else if (e is LinkEvent.Camera cam)               // the host's view, once per frame
         {
@@ -95,7 +96,9 @@ guest.Close();
 
 Events are `LinkEvent.Connected`, `Lost`, `HandshakeFailed`, `Camera`, `Poses`, `Collision`, `Frame`, `Spawn`, `Despawn`,
 `Focus`, `FrameChannel`. Every public method takes the link's lock, so a game thread can send while a helper thread polls.
-Sending without a session throws `NotConnectedException`; a value the contract forbids throws `WireException`, and so do a required
+Sending without a session throws `NotConnectedException`. One `Poll` can return an event and then `Lost` in the same batch (the peer's
+line and its `bye` arrived together), so the session may already be over when you look at an event: answer an event only while
+`IsConnected` is true, as the samples above do. A value the contract forbids throws `WireException`, and so do a required
 string that is null (`Spawn` without a provider, a `Bye` without a reason), `Wire.Decode` with a length outside its buffer and
 `Wire.Chunks` with a negative count or fewer floats than the count needs.
 

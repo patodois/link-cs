@@ -135,6 +135,8 @@ namespace Patodois.RewriteLink.Demo
                             lastPose = p.Values[p.Values.Count - 1].Translation;
                             break;
                         case LinkEvent.Focus fo when fo.Requested:
+                            // An event and Lost can come in one batch: answer only while the session is still there.
+                            if (!link.IsConnected) break;
                             Log("host", "guest asks for input focus; granting it to the " + Control.RoleName(fo.Value));
                             link.SetFocus(fo.Value);
                             giveBackAt = t + 2;
@@ -244,6 +246,8 @@ namespace Patodois.RewriteLink.Demo
                     {
                         case LinkEvent.Connected c:
                             Log("guest", "connected: host \"" + c.Peer.Game + "\", protocol v" + c.Peer.Protocol + ", session 0x" + c.Peer.Session.ToString("x8"));
+                            // An event and Lost can come in one batch: answer only while the session is still there.
+                            if (!link.IsConnected) break;
                             link.Spawn(cube, "C# Guest", "demo/cube", "Cube");
                             askFocusAt = t + 2;
                             lastPos = null;
@@ -264,6 +268,7 @@ namespace Patodois.RewriteLink.Demo
                         case LinkEvent.Camera cam:
                         {
                             cameras++;
+                            if (!link.IsConnected) break;
                             float[] eye = cam.Value.Eye(), fwd = cam.Value.Forward();
                             float[] pos = { eye[0] + 3 * fwd[0], eye[1] + 3 * fwd[1], eye[2] + 3 * fwd[2] };
                             ulong now = Wire.NowUs();
@@ -303,7 +308,7 @@ namespace Patodois.RewriteLink.Demo
                             break;
                     }
                 }
-                if (askFocusAt >= 0 && t >= askFocusAt)
+                if (askFocusAt >= 0 && t >= askFocusAt && link.IsConnected)
                 {
                     askFocusAt = -1;
                     Log("guest", "asking the host for input focus");

@@ -211,6 +211,49 @@ namespace Patodois.RewriteLink.Tests
                 }
             });
 
+            Test("the demo loops survive an event and Lost in one batch", () =>
+            {
+                // host: the guest asks for the focus and says bye in one write; the demo would answer the request after the session ended
+                using (var host = Link.Host(new LinkConfig("H") { ControlPort = 0 }))
+                using (var r = new Raw(host.ControlPort))
+                {
+                    r.Send(Raw.HelloLine("guest", 1, 1, r.UdpPort, 250));
+                    Check(r.WaitLine(host, 2000) != null, "the host's hello");
+                    r.Send("{\"type\":\"input\",\"focus\":\"guest\"}\n{\"type\":\"bye\",\"reason\":\"done\"}\n");
+                    string output = RunDemo("RunHost", host);
+                    Check(output.Contains("LOST the guest: peer said bye: done"), "the host loop saw the end: " + output);
+                }
+                // guest: the host says hello and bye in one write; the demo would spawn its cube after the session ended
+                using (var listener = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp))
+                using (var udp = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp))
+                {
+                    listener.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+                    listener.Listen(1);
+                    udp.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+                    using (var guest = Link.Guest(new LinkConfig("G") { ControlPort = ((IPEndPoint)listener.LocalEndPoint).Port }))
+                    {
+                        Socket conn = null;
+                        Check(Until(2000, () => { guest.Poll(); if (listener.Poll(0, SelectMode.SelectRead)) conn = listener.Accept(); return conn != null; }), "the guest connects");
+                        using (conn)
+                        {
+                            var got = new List<byte>();
+                            var buf = new byte[4096];
+                            Until(2000, () =>
+                            {
+                                guest.Poll();
+                                if (conn.Available > 0) got.AddRange(buf.Take(conn.Receive(buf)));
+                                return got.Contains((byte)'\n');
+                            });
+                            Check(Encoding.UTF8.GetString(got.ToArray()).Contains("\"role\":\"guest\""), "the guest's hello");
+                            conn.Send(Encoding.UTF8.GetBytes("{\"type\":\"hello\",\"role\":\"host\",\"game\":\"raw\",\"protocol\":1,\"min_protocol\":1,\"udp_port\":"
+                                + ((IPEndPoint)udp.LocalEndPoint).Port + ",\"heartbeat_ms\":250,\"timeout_ms\":2000,\"session\":7}\n{\"type\":\"bye\",\"reason\":\"done\"}\n"));
+                            string output = RunDemo("RunGuest", guest);
+                            Check(output.Contains("LOST the host: peer said bye: done"), "the guest loop saw the end: " + output);
+                        }
+                    }
+                }
+            });
+
             Test("Close returns within the linger even if the peer never closes", () =>
             {
                 var host = Link.Host(new LinkConfig("H") { ControlPort = 0 });
@@ -523,6 +566,27 @@ namespace Patodois.RewriteLink.Tests
                     Check(host.Malformed + host.Foreign > 1000, "junk was counted");
                 }
             });
+        }
+
+        /// <summary>Runs the demo's host or guest loop for 0.3 s on <paramref name="link"/>; returns what it printed, or throws what it threw.</summary>
+        private static string RunDemo(string method, Link link)
+        {
+            var program = Type.GetType("Patodois.RewriteLink.Demo.Program, LinkDemo", true);
+            var flags = System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic;
+            program.GetField("_clock", flags).SetValue(null, System.Diagnostics.Stopwatch.StartNew());
+            var output = new System.IO.StringWriter();
+            var saved = Console.Out;
+            try
+            {
+                Console.SetOut(output);
+                program.GetMethod(method, flags).Invoke(null, new object[] { link, 0.3 });
+            }
+            catch (System.Reflection.TargetInvocationException e) when (e.InnerException != null)
+            {
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(e.InnerException).Throw();
+            }
+            finally { Console.SetOut(saved); }
+            return output.ToString();
         }
 
         private static string HelloWithHeartbeat(long ms)
