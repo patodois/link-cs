@@ -198,7 +198,14 @@ namespace Patodois.RewriteLink
 
         private readonly object _gate = new object();
         private readonly Role _role;
-        private readonly LinkConfig _cfg;
+        // What the link needs from its LinkConfig, copied when it is created: later changes to the caller's object, or to the current
+        // directory, change nothing.
+        private readonly string _game;
+        private readonly int _cfgControlPort;    // guest: the host's port when there is no endpoint file
+        private readonly string _cfgToken;       // guest: the token when there is no endpoint file
+        private readonly string _endpointPath;   // absolute, or null
+        private readonly long _cfgTimeoutMs, _reconnectMs;
+        private readonly int _maxCollisionTriangles;
         private readonly long _heartbeatMs;
         private readonly Socket _listener; // host only
         private readonly Socket _udp;
@@ -242,7 +249,7 @@ namespace Patodois.RewriteLink
         // revision 6 (CONTRACT.md 6.2)
         private byte[] _tokenBytes;     // host: the UTF-8 bytes of the token it requires (configured or generated), else null
         private string _helloToken;     // guest: the token for the connection attempt in progress (the configured one, or the endpoint file's)
-        private bool _endpointWritten;  // host: this link wrote cfg.EndpointFile and deletes it when it closes
+        private bool _endpointWritten;  // host: this link wrote _endpointPath and deletes it when it closes, if it is still its own
 
         // diagnostics
         public long DatagramsSent, DatagramsReceived, Malformed, Stale, Foreign, SendDropped, LinesSent, LinesReceived;
@@ -256,13 +263,19 @@ namespace Patodois.RewriteLink
         private Link(Role role, LinkConfig cfg)
         {
             _role = role;
-            _cfg = cfg;
             Tokens.CheckConfigured(cfg.Token, "Token");
             if (cfg.EndpointFile != null && cfg.EndpointFile.Length == 0) throw new ArgumentException("the endpoint file path is empty", "EndpointFile");
             if (cfg.ControlPort < 0 || cfg.ControlPort > 65535) throw new ArgumentException("the control port must be 0 to 65535", "ControlPort");
             if (cfg.UdpPort < 0 || cfg.UdpPort > 65535) throw new ArgumentException("the UDP port must be 0 to 65535", "UdpPort");
             if (cfg.TimeoutMs < 0) throw new ArgumentException("the timeout must not be negative", "TimeoutMs");
             if (cfg.ReconnectMs < 0) throw new ArgumentException("the reconnect delay must not be negative", "ReconnectMs");
+            _game = cfg.Game ?? "";
+            _cfgControlPort = cfg.ControlPort;
+            _cfgToken = cfg.Token;
+            _endpointPath = cfg.EndpointFile == null ? null : FullPath(cfg.EndpointFile);
+            _cfgTimeoutMs = cfg.TimeoutMs;
+            _reconnectMs = cfg.ReconnectMs;
+            _maxCollisionTriangles = cfg.MaxCollisionTriangles;
             _helloToken = cfg.Token;
             _heartbeatMs = Math.Max(Wire.MinHeartbeatMs, Math.Min(Wire.MaxHeartbeatMs, cfg.HeartbeatMs));
             _nextTry = Now();
@@ -310,11 +323,11 @@ namespace Patodois.RewriteLink
                 try
                 {
                     string token = cfg.Token;
-                    if (token == null && cfg.EndpointFile != null) token = Tokens.Generate();
+                    if (token == null && _endpointPath != null) token = Tokens.Generate();
                     if (token != null) _tokenBytes = Tokens.Bytes(token);
-                    if (cfg.EndpointFile != null)
+                    if (_endpointPath != null)
                     {
-                        Endpoint.Write(cfg.EndpointFile, _controlPort, token);
+                        Endpoint.Write(_endpointPath, _controlPort, token);
                         _endpointWritten = true;
                     }
                 }
@@ -325,6 +338,14 @@ namespace Patodois.RewriteLink
                     throw;
                 }
             }
+        }
+
+        /// <summary>The absolute form of an endpoint path, resolved once; a path the runtime cannot resolve is kept as given, so that reading or
+        /// writing it reports the error as before.</summary>
+        private static string FullPath(string path)
+        {
+            try { return System.IO.Path.GetFullPath(path); }
+            catch (Exception) { return path; }
         }
 
         /// <summary>A new token for <see cref="LinkConfig.Token"/>: 32 bytes of the operating system's CSPRNG as 64 lowercase hex digits (see <see cref="Tokens.Generate"/>).</summary>
@@ -345,7 +366,7 @@ namespace Patodois.RewriteLink
         public int UdpPort { get { return _udpPort; } }
         public bool IsConnected { get { lock (_gate) { return _state == State.Live; } } }
         /// <summary>The peer of the current session, or null.</summary>
-        public PeerInfo Peer { get { lock (_gate) { return _state == State.Live ? _peer : null; } } }
+        public PeerInfo Peer { get { lock (_gate) { return _state == State.Live ? _peer.Copy() : null; } } }
         public Role Focus { get { lock (_gate) { return _focus; } } }
 
         // ---------------------------------------------------------------- polling
@@ -380,8 +401,8 @@ namespace Patodois.RewriteLink
         {
             return new Control.Hello
             {
-                Role = _role, Game = _cfg.Game ?? "", Protocol = protocol, MinProtocol = Wire.MinProtocolVersion, UdpPort = (uint)_udpPort,
-                HeartbeatMs = (uint)_heartbeatMs, TimeoutMs = (uint)Math.Min(_cfg.TimeoutMs, uint.MaxValue), Session = session,
+                Role = _role, Game = _game, Protocol = protocol, MinProtocol = Wire.MinProtocolVersion, UdpPort = (uint)_udpPort,
+                HeartbeatMs = (uint)_heartbeatMs, TimeoutMs = (uint)Math.Min(_cfgTimeoutMs, uint.MaxValue), Session = session,
                 Token = _role == Role.Guest ? _helloToken : null, // a host never sends one
             };
         }
@@ -415,15 +436,15 @@ namespace Patodois.RewriteLink
             }
             if (_state == State.Idle && now >= _nextTry)
             {
-                int port = _cfg.ControlPort;
-                _helloToken = _cfg.Token;
-                if (_cfg.EndpointFile != null)
+                int port = _cfgControlPort;
+                _helloToken = _cfgToken;
+                if (_endpointPath != null)
                 {
                     // Before every attempt, the first and each reconnect: the host may have restarted with another port and token. No file, no
                     // attempt; try again after the reconnect delay (no event: the host is just not there yet).
                     EndpointInfo ep;
-                    try { ep = Endpoint.Read(_cfg.EndpointFile); }
-                    catch (EndpointException e) { _lastError = "endpoint file: " + e.Message; _nextTry = now + _cfg.ReconnectMs; return; }
+                    try { ep = Endpoint.Read(_endpointPath); }
+                    catch (EndpointException e) { _lastError = "endpoint file: " + e.Message; _nextTry = now + _reconnectMs; return; }
                     port = ep.ControlPort;
                     _helloToken = ep.Token;
                 }
@@ -442,7 +463,7 @@ namespace Patodois.RewriteLink
                 {
                     _lastError="cannot connect to loopback control port";
                     if (s != null) { try { s.Close(); } catch (SocketException) { } }
-                    _nextTry = now + _cfg.ReconnectMs;
+                    _nextTry = now + _reconnectMs;
                 }
             }
             else if (_state == State.Connecting)
@@ -457,7 +478,7 @@ namespace Patodois.RewriteLink
                         _connecting = null;
                         if(!ctl.Queue(MakeHello(Wire.ProtocolVersion, null))) {
                             _lastError="local hello control line too long";
-                            ctl.CloseQuietly();_state=State.Idle;_nextTry=now+_cfg.ReconnectMs;
+                            ctl.CloseQuietly();_state=State.Idle;_nextTry=now+_reconnectMs;
                             _events.Add(new LinkEvent.HandshakeFailed(_lastError));return;
                         }
                         LinesSent++;
@@ -480,7 +501,7 @@ namespace Patodois.RewriteLink
             if (_connecting != null) { try { _connecting.Close(); } catch (SocketException) { } }
             _connecting = null;
             _state = State.Idle;
-            _nextTry = now + _cfg.ReconnectMs;
+            _nextTry = now + _reconnectMs;
         }
 
         /// <summary>Closes a control connection gracefully, after an optional bye.</summary>
@@ -614,7 +635,7 @@ namespace Patodois.RewriteLink
                 protocol = h.Protocol;
                 session = h.Session.Value;
             }
-            long timeout = Math.Max(_cfg.TimeoutMs, 4L * h.HeartbeatMs);
+            long timeout = Math.Max(_cfgTimeoutMs, 4L * h.HeartbeatMs);
             if (_role == Role.Host)
             {
                 if(!_ctl.Queue(MakeHello(protocol, session))) { _lastError="local hello control line too long";return _lastError; }
@@ -633,7 +654,7 @@ namespace Patodois.RewriteLink
             _lastError = null;
             _lastHeard = now;
             _lastBeat = now;
-            _events.Add(new LinkEvent.Connected(_peer));
+            _events.Add(new LinkEvent.Connected(_peer.Copy()));
             SendHeartbeat();
             return null;
         }
@@ -667,7 +688,7 @@ namespace Patodois.RewriteLink
             Ctl ctl = _ctl;
             _ctl = null;
             _state = State.Idle;
-            _nextTry = _role == Role.Guest ? now + _cfg.ReconnectMs : now;
+            _nextTry = _role == Role.Guest ? now + _reconnectMs : now;
             if (ctl != null) Retire(ctl, bye ? reason : null, now);
             ResetSession();
             _events.Add(wasLive ? (LinkEvent)new LinkEvent.Lost(reason) : new LinkEvent.HandshakeFailed(reason));
@@ -766,7 +787,7 @@ namespace Patodois.RewriteLink
             Assembly a = _assembly;
             if (a.Chunks[c.ChunkIndex] == null)
             {
-                if (a.Triangles + c.TriangleCount > _cfg.MaxCollisionTriangles)
+                if (a.Triangles + c.TriangleCount > _maxCollisionTriangles)
                 {
                     Malformed++; // more than this receiver accepts: the snapshot is dropped, and so are the rest of its chunks
                     _assembly = null;
@@ -797,7 +818,7 @@ namespace Patodois.RewriteLink
 
         private void PollTimers(long now)
         {
-            if (_state == State.Handshake && now - _since > _cfg.TimeoutMs)
+            if (_state == State.Handshake && now - _since > _cfgTimeoutMs)
             {
                 End("no hello before the timeout", true);
             }
@@ -977,7 +998,8 @@ namespace Patodois.RewriteLink
             lock (_gate)
             {
                 if (_closed) return;
-                if (_endpointWritten) { Endpoint.Delete(_cfg.EndpointFile); _endpointWritten = false; }
+                // Only the file this host wrote: another host may have written the path since (CONTRACT.md 6.2: the host removes its file).
+                if (_endpointWritten) { Endpoint.DeleteIfOwn(_endpointPath, _controlPort, _tokenBytes); _endpointWritten = false; }
                 long now = Now();
                 if (_state == State.Connecting && _connecting != null) { try { _connecting.Close(); } catch (SocketException) { } }
                 if ((_state == State.Handshake || _state == State.Live) && _ctl != null) Retire(_ctl, "closing", now);

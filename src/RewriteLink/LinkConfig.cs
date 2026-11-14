@@ -1,6 +1,9 @@
 namespace Patodois.RewriteLink
 {
-    /// <summary>Settings for <see cref="Link.Host"/> and <see cref="Link.Guest"/>. Everything is loopback only.</summary>
+    /// <summary>
+    /// Settings for <see cref="Link.Host"/> and <see cref="Link.Guest"/>. Everything is loopback only. The link copies what it needs when it is created
+    /// (with <see cref="EndpointFile"/> made absolute), so changing this object afterwards, or the current directory, does not affect it.
+    /// </summary>
     public sealed class LinkConfig
     {
         /// <summary>This side's game, sent in hello.</summary>
@@ -29,7 +32,7 @@ namespace Patodois.RewriteLink
         /// <summary>
         /// Revision 6 (CONTRACT.md 6.2), default null. Host: after the control port is bound the link writes this file with the port it bound and the token
         /// (a new one from <see cref="Tokens.Generate"/> if <see cref="Token"/> is null, and then the host requires it), and deletes it when the link is
-        /// closed; if the file cannot be written, creating the host throws <see cref="EndpointException"/>. Guest: before every connection attempt it reads
+        /// closed if the file still holds that port and token (another host may have written the path since); if the file cannot be written, creating the host throws <see cref="EndpointException"/>. Guest: before every connection attempt it reads
         /// this file and uses its port and token instead of <see cref="ControlPort"/> and <see cref="Token"/>; when the file cannot be read it does not
         /// attempt this time, and tries again after <see cref="ReconnectMs"/>.
         /// </summary>

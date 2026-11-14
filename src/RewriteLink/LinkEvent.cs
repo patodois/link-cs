@@ -12,6 +12,9 @@ namespace Patodois.RewriteLink
         public long HeartbeatMs;
         /// <summary>The watchdog timeout in force for this peer.</summary>
         public long TimeoutMs;
+
+        /// <summary>The link hands out copies: what a caller does to one cannot change the session the link keeps.</summary>
+        internal PeerInfo Copy() { return (PeerInfo)MemberwiseClone(); }
     }
 
     public enum LinkEventKind { Connected, Lost, HandshakeFailed, Camera, Poses, Collision, Frame, Spawn, Despawn, Focus, FrameChannel }

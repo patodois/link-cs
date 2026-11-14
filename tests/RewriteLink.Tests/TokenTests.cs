@@ -285,6 +285,58 @@ namespace Patodois.RewriteLink.Tests
                 Eq(Names(dir), "", "and nothing else is in the directory");
             });
 
+            Test("endpoint: a host copies its configuration, so a reused config object cannot make it delete another file", () =>
+            {
+                string dir = NewDir(), a = Path.Combine(dir, "a.json"), b = Path.Combine(dir, "b.json");
+                var cfg = new LinkConfig("h") { ControlPort = 0, EndpointFile = a };
+                var h1 = Link.Host(cfg);
+                cfg.EndpointFile = b;
+                File.WriteAllText(b, "x");
+                h1.Close();
+                Check(File.Exists(b), "the other file is still there");
+                Check(!File.Exists(a), "the host removed its own file");
+            });
+
+            Test("endpoint: a closing host removes the endpoint file only while it holds its own port and token", () =>
+            {
+                string dir = NewDir(), file = Path.Combine(dir, "shared.json");
+                var h1 = Link.Host(new LinkConfig("first") { ControlPort = 0, EndpointFile = file });
+                var h2 = Link.Host(new LinkConfig("second") { ControlPort = 0, EndpointFile = file });
+                try
+                {
+                    h1.Close();
+                    Check(File.Exists(file), "the second host's file is still there");
+                    Eq(Endpoint.Read(file).ControlPort, h2.ControlPort, "and still names the second host");
+                }
+                finally { h1.Close(); h2.Close(); }
+                Check(!File.Exists(file), "closing the second host removes it");
+
+                // a file with this host's port but another token, and one that is not an endpoint file, stay
+                foreach (bool endpointFile in new[] { true, false })
+                {
+                    var h = Link.Host(new LinkConfig("third") { ControlPort = 0, EndpointFile = file });
+                    if (endpointFile) Endpoint.Write(file, h.ControlPort, Tokens.Generate());
+                    else File.WriteAllText(file, "not an endpoint file");
+                    h.Close();
+                    Check(File.Exists(file), endpointFile ? "a file with another token stays" : "a file that is not an endpoint file stays");
+                    File.Delete(file);
+                }
+            });
+
+            Test("a peer handed out in an event or by Peer is a copy", () =>
+            {
+                using (var p = new Pair())
+                {
+                    uint session = p.Host.Peer.Session;
+                    p.Host.Peer.Session = session + 1;
+                    p.HE.OfType<LinkEvent.Connected>().First().Peer.Session = session + 1;
+                    Eq(p.Host.Peer.Session, session, "the link's session is unchanged");
+                    long before = p.Host.DatagramsReceived;
+                    p.Guest.SendCamera(Wire.Camera.LookAt(new float[] { 0, 0, 5 }, new float[3], 1f, .1f, 10f, 4, 4));
+                    Check(Until(2000, () => { p.Pump(); return p.Host.DatagramsReceived > before; }), "datagrams of the session are still accepted");
+                }
+            });
+
             Test("endpoint: a host whose endpoint file cannot be written fails, closes its port and shows no token", () =>
             {
                 int port;

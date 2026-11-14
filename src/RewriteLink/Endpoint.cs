@@ -224,6 +224,25 @@ namespace Patodois.RewriteLink
             }
             catch (Exception) { return false; }
         }
+
+        /// <summary>
+        /// A closing host's removal: deletes the file only while it is still this host's, that is, while a guest would accept it (<see cref="Read"/>)
+        /// and it holds <paramref name="controlPort"/> and the token <paramref name="token"/> (compared in constant time). A file that another host has
+        /// written since, one that is not an endpoint file and one that cannot be read stay. Best effort, never throws.
+        /// </summary>
+        internal static bool DeleteIfOwn(string path, int controlPort, byte[] token)
+        {
+            if (string.IsNullOrEmpty(path) || token == null) return false;
+            try
+            {
+                EndpointInfo info = Read(path);
+                bool samePort = info.ControlPort == controlPort;
+                bool sameToken = Tokens.Equal(Tokens.Bytes(info.Token), token);
+                if (!(samePort & sameToken)) return false;
+            }
+            catch (Exception) { return false; }
+            return Delete(path);
+        }
     }
 
     /// <summary>
