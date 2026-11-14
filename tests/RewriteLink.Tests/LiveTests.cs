@@ -330,6 +330,23 @@ namespace Patodois.RewriteLink.Tests
                 }
             });
 
+            Test("the link clock keeps counting milliseconds after 107 days of stopwatch ticks", () =>
+            {
+                using (var g = Link.Guest(new LinkConfig("clock") { ControlPort = 1 }))
+                {
+                    var flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+                    var clock = (System.Diagnostics.Stopwatch)typeof(Link).GetField("_clock", flags).GetValue(g);
+                    var elapsed = typeof(System.Diagnostics.Stopwatch).GetField("_elapsed", flags);
+                    Check(elapsed != null, "this runtime's Stopwatch keeps its elapsed ticks in _elapsed");
+                    // 9.3e15 ticks: 107.6 days where Stopwatch.Frequency is 10^9 (.NET on Linux and macOS), where ticks * 1000 passes 2^63
+                    const long ticks = 9_300_000_000_000_000;
+                    elapsed.SetValue(clock, ticks);
+                    long expected = (long)(ticks / (decimal)System.Diagnostics.Stopwatch.Frequency * 1000m);
+                    long now = (long)typeof(Link).GetMethod("Now", flags).Invoke(g, null);
+                    Check(now >= expected && now < expected + 60000, "Now() is " + now + " ms, expected about " + expected);
+                }
+            });
+
             Test("review M6: poses of unspawned entities are ignored; at most 1024 live entities", () =>
             {
                 using (var p = new Pair())

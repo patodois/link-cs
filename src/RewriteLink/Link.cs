@@ -332,7 +332,8 @@ namespace Patodois.RewriteLink
         /// <summary>Connects to a host on 127.0.0.1:<c>cfg.ControlPort</c>, retrying until one answers.</summary>
         public static Link Guest(LinkConfig cfg) { return new Link(Role.Guest, cfg); }
 
-        private long Now() { return _clock.ElapsedTicks * 1000L / Stopwatch.Frequency; }
+        // ElapsedMilliseconds does not overflow; ElapsedTicks * 1000 did after 106.75 days where Stopwatch.Frequency is 10^9.
+        private long Now() { return _clock.ElapsedMilliseconds; }
 
         public Role Role { get { return _role; } }
         /// <summary>Host: the control port actually bound.</summary>
