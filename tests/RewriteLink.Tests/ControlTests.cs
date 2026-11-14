@@ -81,6 +81,23 @@ namespace Patodois.RewriteLink.Tests
                 Eq(((Control.Despawn)Control.Parse("{\"type\":\"despawn\",\"entity\":4294967295}")).Entity, uint.MaxValue, "the largest entity id");
             });
 
+            Test("control: a required string that is null throws WireException, in the codec and through the link", () =>
+            {
+                Throws<WireException>(() => new Control.Spawn(1, null, "a", null).ToLine(), "spawn without a provider");
+                Throws<WireException>(() => new Control.Spawn(1, "p", null, null).ToLine(), "spawn without an asset");
+                Throws<WireException>(() => new Control.Bye(null).ToLine(), "bye without a reason");
+                Throws<WireException>(() => new Control.FrameChannel(null, 1, 1, 1).ToLine(), "frame_channel without a path");
+                Throws<WireException>(() => new Control.Hello { Role = Role.Guest, Protocol = 1, MinProtocol = 1, UdpPort = 1, HeartbeatMs = 250 }.ToLine(), "hello without a game");
+                Eq(new Control.Spawn(1, "p", "a", null).ToLine(), "{\"type\":\"spawn\",\"entity\":1,\"provider\":\"p\",\"asset\":\"a\"}\n", "the name stays optional");
+                using (var p = new Pair())
+                {
+                    Throws<WireException>(() => p.Guest.Spawn(1, null, "a", null), "Link.Spawn without a provider");
+                    Check(p.Guest.IsConnected, "the session goes on");
+                    p.Guest.Spawn(2, "p", "a", null);
+                    Check(Until(2000, () => { p.Pump(); return p.H<LinkEvent.Spawn>() == 1; }), "and the next spawn arrives");
+                }
+            });
+
             Test("control: broken lines are protocol errors", () =>
             {
                 foreach (string bad in new[]

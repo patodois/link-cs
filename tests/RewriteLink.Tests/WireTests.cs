@@ -168,6 +168,24 @@ namespace Patodois.RewriteLink.Tests
                 Throws<WireException>(() => Wire.Encode(new Hdr(1, 0, 1, 0, 0), new Wire.FrameMsg(new Wire.FrameReady(0, 0, 0, 1, 1))), "frame 0");
             });
 
+            Test("Wire.Decode throws WireException for a length outside its buffer or no buffer", () =>
+            {
+                byte[] ok = T.Hex(ExampleHeartbeat);
+                Throws<WireException>(() => Wire.Decode(new byte[10], 24), "24 bytes of a 10-byte buffer");
+                Throws<WireException>(() => Wire.Decode(ok, ok.Length + 1), "one byte past the buffer");
+                Throws<WireException>(() => Wire.Decode(null, 24), "no buffer");
+                Throws<WireException>(() => Wire.Decode(ok, -1), "a negative length");
+                Check(Wire.Decode(ok, ok.Length).Body is Wire.HeartbeatMsg, "the whole buffer still decodes");
+            });
+
+            Test("Wire.Chunks throws WireException for a negative count or too few floats", () =>
+            {
+                Throws<WireException>(() => Wire.Chunks(1, new float[3], 1f, new float[9], 2), "2 triangles in 9 floats");
+                Throws<WireException>(() => Wire.Chunks(1, new float[3], 1f, new float[9], -1), "a negative count");
+                Throws<WireException>(() => Wire.Chunks(1, new float[3], 1f, null, 1), "no array");
+                Eq(Wire.Chunks(1, new float[3], 1f, new float[18], 2)[0].TriangleCount, 2, "a matching array still chunks");
+            });
+
             Test("malformed datagrams are rejected", () =>
             {
                 byte[] ok = Hex(ExampleHeartbeat);

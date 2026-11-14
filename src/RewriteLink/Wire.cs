@@ -405,9 +405,14 @@ namespace Patodois.RewriteLink
 
         // ------------------------------------------------------------------ decode
 
-        /// <summary>Checks length, magic and version and reads the header; returns the kind in <paramref name="kind"/>.</summary>
+        /// <summary>
+        /// Checks length, magic and version and reads the header; returns the kind in <paramref name="kind"/>. Anything malformed, a null buffer
+        /// or a <paramref name="len"/> outside it included, throws <see cref="WireException"/>.
+        /// </summary>
         public static Header DecodeHeader(byte[] buf, int len, out int kind)
         {
+            if (buf == null) throw new WireException("no datagram buffer");
+            if (len > buf.Length) throw new WireException("length " + len + " is beyond the buffer of " + buf.Length + " bytes");
             if (len < HeaderLen) throw new WireException("truncated: need 24 bytes, got " + len);
             if (Get32(buf, 0) != Magic) throw new WireException("bad magic");
             int version = (int)Get16(buf, 4);
@@ -422,7 +427,10 @@ namespace Patodois.RewriteLink
                 throw new WireException("kind " + kind + ": expected " + (HeaderLen + expected) + " bytes, got " + (HeaderLen + payload));
         }
 
-        /// <summary>Decodes one datagram. Anything malformed throws <see cref="WireException"/>; nothing else is thrown.</summary>
+        /// <summary>
+        /// Decodes the first <paramref name="len"/> bytes of <paramref name="buf"/> as one datagram. Anything malformed, a null buffer or a length
+        /// outside it included, throws <see cref="WireException"/>; nothing else is thrown.
+        /// </summary>
         public static Decoded Decode(byte[] buf, int len)
         {
             int kind;
@@ -510,12 +518,15 @@ namespace Patodois.RewriteLink
         /// <summary>
         /// Splits a snapshot (9 floats per triangle) into datagram-sized chunks; an empty one still gives one chunk. A snapshot that needs
         /// more than <see cref="MaxCollisionChunks"/> chunks (more than 925696 triangles) is refused with a <see cref="WireException"/>
-        /// before anything is allocated.
+        /// before anything is allocated, and so are a negative <paramref name="triangleCount"/> and a <paramref name="triangles"/> that is null or
+        /// holds fewer than <paramref name="triangleCount"/> triangles.
         /// </summary>
         public static List<CollisionChunk> Chunks(uint query, float[] center, float radius, float[] triangles, int triangleCount)
         {
+            if (triangleCount < 0) throw new WireException("negative triangle count " + triangleCount);
             int count = ChunkCount(triangleCount);
             if (count > MaxCollisionChunks) throw new WireException("too many triangles: a snapshot has at most " + MaxCollisionChunks + " chunks");
+            if (triangles == null || triangles.Length < 9L * triangleCount) throw new WireException("triangles holds fewer than triangleCount triangles");
             var list = new List<CollisionChunk>(count);
             for (int i = 0; i < count; i++)
             {

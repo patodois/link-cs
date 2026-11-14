@@ -13,8 +13,15 @@ namespace Patodois.RewriteLink
         public static string RoleName(Role r) { return r == Role.Host ? "host" : "guest"; }
         internal static Role Other(Role r) { return r == Role.Host ? Role.Guest : Role.Host; }
 
-        /// <summary>The message as one JSON line, newline included.</summary>
+        /// <summary>The message as one JSON line, newline included. A required string field that is null throws <see cref="WireException"/>.</summary>
         public abstract string ToLine();
+
+        /// <summary>A required string field as a JSON string literal; null is a field the contract requires and the message lacks.</summary>
+        private static string Required(string value, string field)
+        {
+            if (value == null) throw new WireException("the " + field + " field is required and is null");
+            return Json.Quote(value);
+        }
 
         /// <summary><see cref="Session"/> is null in a guest hello and a nonzero u32 in a host hello.</summary>
         public sealed class Hello : Control
@@ -32,7 +39,7 @@ namespace Patodois.RewriteLink
             {
                 var b = new StringBuilder();
                 b.Append("{\"type\":\"hello\",\"role\":").Append(Json.Quote(RoleName(Role)))
-                 .Append(",\"game\":").Append(Json.Quote(Game))
+                 .Append(",\"game\":").Append(Required(Game, "game"))
                  .Append(",\"protocol\":").Append(Protocol).Append(",\"min_protocol\":").Append(MinProtocol)
                  .Append(",\"udp_port\":").Append(UdpPort).Append(",\"heartbeat_ms\":").Append(HeartbeatMs)
                  .Append(",\"timeout_ms\":").Append(TimeoutMs);
@@ -53,8 +60,8 @@ namespace Patodois.RewriteLink
             public override string ToLine()
             {
                 var b = new StringBuilder();
-                b.Append("{\"type\":\"spawn\",\"entity\":").Append(Entity).Append(",\"provider\":").Append(Json.Quote(Provider))
-                 .Append(",\"asset\":").Append(Json.Quote(Asset));
+                b.Append("{\"type\":\"spawn\",\"entity\":").Append(Entity).Append(",\"provider\":").Append(Required(Provider, "provider"))
+                 .Append(",\"asset\":").Append(Required(Asset, "asset"));
                 if (Name != null) b.Append(",\"name\":").Append(Json.Quote(Name));
                 return b.Append("}\n").ToString();
             }
@@ -86,7 +93,7 @@ namespace Patodois.RewriteLink
             public FrameChannel(string path, uint width, uint height, uint slots) { Path = path; Width = width; Height = height; Slots = slots; }
             public override string ToLine()
             {
-                return "{\"type\":\"frame_channel\",\"path\":" + Json.Quote(Path) + ",\"width\":" + Width + ",\"height\":" + Height + ",\"slots\":" + Slots + "}\n";
+                return "{\"type\":\"frame_channel\",\"path\":" + Required(Path, "path") + ",\"width\":" + Width + ",\"height\":" + Height + ",\"slots\":" + Slots + "}\n";
             }
         }
 
@@ -94,7 +101,7 @@ namespace Patodois.RewriteLink
         {
             public string Reason;
             public Bye(string reason) { Reason = reason; }
-            public override string ToLine() { return "{\"type\":\"bye\",\"reason\":" + Json.Quote(Reason) + "}\n"; }
+            public override string ToLine() { return "{\"type\":\"bye\",\"reason\":" + Required(Reason, "reason") + "}\n"; }
         }
 
         /// <summary>A "type" this version does not know; ignored by receivers.</summary>
@@ -102,7 +109,7 @@ namespace Patodois.RewriteLink
         {
             public string Type;
             public Unknown(string type) { Type = type; }
-            public override string ToLine() { return "{\"type\":" + Json.Quote(Type) + "}\n"; }
+            public override string ToLine() { return "{\"type\":" + Required(Type, "type") + "}\n"; }
         }
 
         /// <summary>

@@ -95,7 +95,9 @@ guest.Close();
 
 Events are `LinkEvent.Connected`, `Lost`, `HandshakeFailed`, `Camera`, `Poses`, `Collision`, `Frame`, `Spawn`, `Despawn`,
 `Focus`, `FrameChannel`. Every public method takes the link's lock, so a game thread can send while a helper thread polls.
-Sending without a session throws `NotConnectedException`; a value the contract forbids throws `WireException`.
+Sending without a session throws `NotConnectedException`; a value the contract forbids throws `WireException`, and so do a required
+string that is null (`Spawn` without a provider, a `Bye` without a reason), `Wire.Decode` with a length outside its buffer and
+`Wire.Chunks` with a negative count or fewer floats than the count needs.
 
 ## Authentication: the token and the endpoint file (contract revision 6, version 0.2.0)
 
