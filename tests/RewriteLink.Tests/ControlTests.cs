@@ -220,6 +220,31 @@ namespace Patodois.RewriteLink.Tests
                 Console.WriteLine("     fuzz: " + ok + " lines parsed, " + bad + " refused");
                 Check(bad > 1000, "most mutations are refused");
             });
+
+            Test("revision 8: a number is refused exactly when its correctly rounded double is not finite", () =>
+            {
+                const string halfway = "179769313486231580793728971405303415079934132710037826936173778980444968292764750946649017977587"
+                    + "2070963302864166928879109465555478519404026306574886715058206819089020007083836762738548458177115"
+                    + "3176447573027006985557136695962284291481986083493647529271907416844436551070434271155969950809304"
+                    + "2880177904174497792";
+                Eq(halfway.Length, 309, "2^1024 - 2^970 has 309 digits");
+                Func<string, string> line = lit => "{\"type\":\"despawn\",\"entity\":1,\"x\":" + lit + "}";
+                foreach (string lit in new[]
+                {
+                    "1.7976931348623157e308", "1.7976931348623158e308", "1.797693134862315807e308", "-1.797693134862315807e308", "1e-400", "-0", "0.0e999",
+                    halfway.Substring(0, 308) + "1", halfway.Substring(0, 308) + "1.999", "0." + halfway.Substring(0, 308) + "1e309",
+                    "1797693134862315807e290", halfway.Substring(0, 100) + "." + halfway.Substring(100, 50) + "e208",
+                })
+                    Eq(((Control.Despawn)Control.Parse(line(lit))).Entity, 1u, lit + " is accepted");
+                foreach (string lit in new[]
+                {
+                    "1.797693134862315808e308", halfway, "-" + halfway, halfway + ".0", halfway + ".0000001", "0." + halfway + "e309", "1e400", "-1e400",
+                    "1" + new string('0', 309), "1797693134862315808e290", "10e308",
+                })
+                    Throws<WireException>(() => Control.Parse(line(lit)), lit + " is refused");
+                Throws<WireException>(() => Control.Parse("{\"type\":\"despawn\",\"entity\":1,\"x\":{\"a\":[1e400]}}"), "at any depth");
+            });
+
         }
     }
 }

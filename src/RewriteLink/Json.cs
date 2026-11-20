@@ -9,7 +9,7 @@ namespace Patodois.RewriteLink
     /// A strict JSON reader for the control lines. It accepts exactly what the Rust side's serde_json accepts,
     /// because a line that one implementation takes and another refuses is a way to make them disagree: numbers
     /// follow the JSON grammar (no leading zeros, no "1.", no "+1"), "-0" is a float (so no integer), a number
-    /// beyond the range of a double is an error, a unicode escape takes exactly four hex digits and surrogate
+    /// whose correctly rounded double is not finite is an error and one that rounds to the largest double is not (CONTRACT.md 8, revision 8), a unicode escape takes exactly four hex digits and surrogate
     /// escapes must come as a valid pair, a \u0000 escape is an error in any string or key (CONTRACT.md section 8, "Syntax of a line", 4:
     /// the C implementation cannot hold one, so none accepts it; it is refused even in a value that a later duplicate key overrides, because the scanner
     /// sees every string), and arrays and objects nest at most 127 deep.
@@ -161,54 +161,55 @@ namespace Patodois.RewriteLink
                 return Other;
             }
 
-            /// <summary>A number beyond the range of a double is an error (it would be infinity). Decided on the digits, so it
-            /// is the same on every runtime (double.Parse overflows differently on .NET Framework and .NET Core).</summary>
+            /// <summary>
+            /// The value halfway between the largest finite double, 1.7976931348623157e308, and 2^1024: 2^1024 - 2^970, all 309 digits. A literal
+            /// below it in magnitude rounds (to nearest, ties to even) to a finite double; one at or above it rounds to infinity.
+            /// </summary>
+            private const string HalfwayToInfinity =
+                "179769313486231580793728971405303415079934132710037826936173778980444968292764750946649017977587207096330286416692887910946555547851"
+                + "940402630657488671505820681908902000708383676273854845817711531764475730270069855571366959622842914819860834936475292719074168444365"
+                + "510704342711559699508093042880177904174497792";
+
+            /// <summary>
+            /// CONTRACT.md 8, "Syntax of a line" 9 (revision 8): a literal whose value, correctly rounded to a double, is not finite is an error;
+            /// one that rounds to the largest finite double is accepted, and so is one that rounds to zero. Decided on the digits, exactly as
+            /// correct rounding decides, so it is the same on every runtime (double.Parse overflows differently on .NET Framework and .NET Core):
+            /// the literal is refused when its magnitude is at least <see cref="HalfwayToInfinity"/>.
+            /// </summary>
             private void CheckRange(int intStart, int intEnd, int fracStart, int fracEnd, long exp10)
             {
-                var first = new char[17];
-                int nfirst = 0, sigInt = 0;
-                bool have = false;
+                // The significant digits run from the first nonzero digit, in the integer part or else in the fraction, to the end of the
+                // fraction; the value is d.ddd... * 10^dexp.
+                int first = -1;
                 long dexp = 0;
                 for (int k = intStart; k < intEnd; k++)
+                    if (_s[k] != '0') { first = k; dexp = intEnd - k - 1 + exp10; break; }
+                if (first < 0)
                 {
-                    if (!have && _s[k] == '0') continue;
-                    have = true;
-                    if (nfirst < 17) first[nfirst++] = _s[k];
-                    sigInt++;
+                    for (int k = fracStart; k < fracEnd; k++)
+                        if (_s[k] != '0') { first = k; dexp = -(k - fracStart + 1) + exp10; break; }
+                    if (first < 0) return; // zero
                 }
-                if (have)
-                {
-                    for (int k = fracStart; k < fracEnd && nfirst < 17; k++) first[nfirst++] = _s[k];
-                    dexp = sigInt - 1 + exp10;
-                }
-                else
-                {
-                    int lead = 0, k = fracStart;
-                    for (; k < fracEnd; k++)
-                    {
-                        if (_s[k] == '0') { lead++; continue; }
-                        have = true;
-                        break;
-                    }
-                    if (have)
-                    {
-                        for (; k < fracEnd && nfirst < 17; k++) first[nfirst++] = _s[k];
-                        dexp = -(lead + 1) + exp10;
-                    }
-                }
-                if (!have) return;
+                if (dexp < 308) return;
                 if (dexp > 308) throw new JsonException("number out of range");
-                if (dexp == 308)
+                // dexp == 308: compare the digits with the halfway value's, digit by digit; digits past the literal's last are zeros. With no
+                // fraction, fracStart and fracEnd are both 0.
+                bool inInt = first < intEnd;
+                int at = first;
+                for (int m = 0; m < HalfwayToInfinity.Length; m++)
                 {
-                    const string max17 = "17976931348623158";
-                    for (int m = 0; m < 17; m++)
+                    char c;
+                    if (inInt && at < intEnd) c = _s[at++];
+                    else
                     {
-                        char c = m < nfirst ? first[m] : '0';
-                        if (c > max17[m]) throw new JsonException("number out of range");
-                        if (c < max17[m]) return;
+                        if (inInt) { inInt = false; at = fracStart; }
+                        c = at < fracEnd ? _s[at++] : '0';
                     }
-                    throw new JsonException("number out of range");
+                    if (c > HalfwayToInfinity[m]) throw new JsonException("number out of range");
+                    if (c < HalfwayToInfinity[m]) return;
                 }
+                // The first 309 digits are the halfway value's: the literal is that value (a tie, which rounds to even, 2^1024) or more.
+                throw new JsonException("number out of range");
             }
 
             private string Str()
