@@ -16,14 +16,29 @@ namespace Patodois.RewriteLink
     }
 
     /// <summary>
-    /// One side of a passthrough link (host or guest). Create it with <see cref="Host"/> or <see cref="Guest"/>, then call
-    /// <see cref="Poll()"/> regularly; it never blocks. Every public method takes the link's lock, so a game thread may send while a
+    /// One side of a passthrough link (host or guest), protocol v1, contract revision 8. Create it with <see cref="Host"/> or <see cref="Guest"/>,
+    /// then call <see cref="Poll()"/> regularly; it never blocks. Every public method takes the link's lock, so a game thread may send while a
     /// helper thread polls. Everything binds and connects to 127.0.0.1 only.
     /// </summary>
     public sealed class Link : IDisposable
     {
         private const long ConnectTimeoutMs = 1000;
 
+        // The bounds of CONTRACT.md section 2 (revision 8), at the reference values the shared tests assume.
+        /// <summary>Host: connections accepted at most per poll; the others wait in the system's backlog for the next poll.</summary>
+        internal const int MaxAcceptsPerPoll = 8;
+        /// <summary>Host: connections held at most while no session is live, each until its first complete line; a new one displaces the oldest.</summary>
+        internal const int MaxCandidates = 4;
+        /// <summary>Sockets held at most while they close (the drain of section 6.1); one more closes the oldest at once, without its drain.</summary>
+        internal const int MaxClosing = 16;
+        /// <summary>Datagrams read at most per poll while a session is live; the rest wait in the socket for the next poll.</summary>
+        internal const int MaxDatagramsPerPoll = 1024;
+        /// <summary>Datagrams read, and discarded, at most per poll while no session is live; none of them can be the peer's.</summary>
+        internal const int MaxDatagramsWithoutSession = 64;
+        /// <summary>The listen backlog: room for the connections that wait while a poll accepts at most <see cref="MaxAcceptsPerPoll"/>.</summary>
+        private const int ListenBacklog = 128;
+
+        /// <summary>A guest's states. A host is Idle or Live: the connections it holds before a session are its candidates.</summary>
         private enum State { Idle, Connecting, Handshake, Live }
 
         // ---------------------------------------------------------------- the control connection
@@ -189,11 +204,26 @@ namespace Patodois.RewriteLink
                 catch (ObjectDisposedException) { return Done(); }
             }
 
+            /// <summary>Closes the socket at once, without the rest of the drain (the bound on closing sockets, CONTRACT.md 2 and 6.1, revision 8).</summary>
+            public void Abort() { Done(); }
+
             private bool Done()
             {
                 try { Sock.Close(); } catch (SocketException) { } catch (ObjectDisposedException) { }
                 return false;
             }
+        }
+
+        /// <summary>
+        /// Host: a connection that has not yet delivered a complete first line, while no session is live (CONTRACT.md 2, revision 8). At most
+        /// <see cref="MaxCandidates"/> are held; the first whose first line is an acceptable hello becomes the session.
+        /// </summary>
+        private sealed class Candidate
+        {
+            public readonly Ctl Ctl;
+            /// <summary>When its wait for a first line began: when it was accepted.</summary>
+            public long Since;
+            public Candidate(Ctl ctl, long since) { Ctl = ctl; Since = since; }
         }
 
         private sealed class Assembly
@@ -237,7 +267,10 @@ namespace Patodois.RewriteLink
         private PeerInfo _peer;
         private IPEndPoint _peerEp;
         private long _timeoutMs, _lastHeard, _lastBeat;
+        /// <summary>Connections being closed gracefully, oldest first; at most <see cref="MaxClosing"/>.</summary>
         private readonly List<Closing> _closing = new List<Closing>();
+        /// <summary>Host: the connections held while no session is live, oldest first (CONTRACT.md 2, revision 8).</summary>
+        private readonly List<Candidate> _candidates = new List<Candidate>();
         private readonly List<LinkEvent> _events = new List<LinkEvent>();
         private uint _seq;
         private uint _nextQuery = 1;
@@ -309,7 +342,7 @@ namespace Patodois.RewriteLink
                 {
                     l = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
                     l.Bind(new IPEndPoint(IPAddress.Loopback, cfg.ControlPort));
-                    l.Listen(8);
+                    l.Listen(ListenBacklog);
                     l.Blocking = false;
                 }
             }
@@ -364,7 +397,13 @@ namespace Patodois.RewriteLink
         /// <summary>A new token for <see cref="LinkConfig.Token"/>: 32 bytes of the operating system's CSPRNG as 64 lowercase hex digits (see <see cref="Tokens.Generate"/>).</summary>
         public static string GenerateToken() { return Tokens.Generate(); }
 
-        /// <summary>Listens for one guest on 127.0.0.1:<c>cfg.ControlPort</c>.</summary>
+        /// <summary>
+        /// Listens for one guest on 127.0.0.1:<c>cfg.ControlPort</c>. Any local process can connect, so a connection proves nothing until its first
+        /// line has been read (CONTRACT.md 2, revision 8): while no session is live the host holds up to four connections that have not sent a
+        /// complete line yet, and the first whose first line is an acceptable hello becomes the session; the others are then told busy. A fifth
+        /// connection displaces the oldest, which is closed with a bye. Each poll accepts at most eight connections and reads each at once, and the
+        /// host holds at most sixteen sockets while they close. While a session is live every other connection is told busy.
+        /// </summary>
         public static Link Host(LinkConfig cfg) { return new Link(Role.Host, cfg); }
 
         /// <summary>Connects to a host on 127.0.0.1:<c>cfg.ControlPort</c>, retrying until one answers.</summary>
@@ -433,7 +472,18 @@ namespace Patodois.RewriteLink
         {
             if (_listener != null)
             {
-                while (true)
+                // The candidates already held are read first, oldest first, before anything new is accepted (CONTRACT.md 2, revision 8).
+                if (_candidates.Count > 0)
+                {
+                    var held = _candidates.ToArray();
+                    _candidates.Clear();
+                    foreach (Candidate c in held)
+                    {
+                        if (_state == State.Live) Retire(c.Ctl, "busy", now);
+                        else if (ReadCandidate(c, now)) _candidates.Add(c);
+                    }
+                }
+                for (int n = 0; n < MaxAcceptsPerPoll; n++) // the others wait in the backlog for the next poll
                 {
                     Socket s;
                     try
@@ -446,8 +496,19 @@ namespace Patodois.RewriteLink
                     Ctl ctl;
                     try { ctl = new Ctl(s); }
                     catch (SocketException) { try { s.Close(); } catch (SocketException) { } continue; }
-                    if (_state == State.Idle) { _ctl = ctl; _state = State.Handshake; _since = now; }
-                    else Retire(ctl, "busy", now); // one guest per host
+                    // One guest per host: while a session is live, any other connection is answered busy before anything of it is read.
+                    if (_state == State.Live) { Retire(ctl, "busy", now); continue; }
+                    if (_candidates.Count >= MaxCandidates)
+                    {
+                        // Its own reason, not busy: no session is live, and the peer may connect again.
+                        Candidate oldest = _candidates[0];
+                        _candidates.RemoveAt(0);
+                        Retire(oldest.Ctl, "no first line before newer connections arrived", now);
+                    }
+                    // Read at once, before the next connection is accepted: a guest that sends its hello as soon as it is connected is never the
+                    // candidate that silent connections displace.
+                    var cand = new Candidate(ctl, now);
+                    if (ReadCandidate(cand, now)) _candidates.Add(cand);
                 }
                 return;
             }
@@ -530,7 +591,59 @@ namespace Patodois.RewriteLink
                 else _lastError="local bye control line too long";
             }
             var c = new Closing(ctl, now);
-            if (c.Pump(now)) _closing.Add(c);
+            if (c.Pump(now))
+            {
+                // At most MaxClosing (CONTRACT.md 2 and 6.1, revision 8): the oldest is closed at once, without the rest of its drain, so
+                // connections that never read cannot cost a socket each for the linger.
+                if (_closing.Count >= MaxClosing)
+                {
+                    _closing[0].Abort();
+                    _closing.RemoveAt(0);
+                }
+                _closing.Add(c);
+            }
+        }
+
+        /// <summary>
+        /// Host: reads candidate <paramref name="c"/> and acts on its first line, if a complete one has arrived (CONTRACT.md 2, revision 8). True if
+        /// it still is a candidate. A first line that is an acceptable hello makes it the session, and every other candidate is answered busy; any
+        /// other first line is refused as section 6 says, and the other candidates are not affected. Lines that came after the hello in the same
+        /// read stay in the connection's buffer and belong to the session (the poll handles them next).
+        /// </summary>
+        private bool ReadCandidate(Candidate c, long now)
+        {
+            Ctl ctl = c.Ctl;
+            ctl.Fill();
+            string line = ctl.NextLine();
+            if (line == null)
+            {
+                if (ctl.Fatal != null) { Refuse(ctl, ctl.Fatal, true, now); return false; } // a protocol error: the peer is told
+                if (ctl.End != null) { Refuse(ctl, ctl.End, false, now); return false; }
+                return true; // nothing, or part of a line: still a candidate, which a newer connection may displace
+            }
+            LinesReceived++;
+            Control msg;
+            try { msg = Control.Parse(line); }
+            catch (WireException e) { Refuse(ctl, "protocol error: " + e.Message, true, now); return false; }
+            var b = msg as Control.Bye;
+            if (b != null) { Refuse(ctl, "peer said bye: " + b.Reason, false, now); return false; }
+            var h = msg as Control.Hello;
+            if (h == null) { Refuse(ctl, "expected hello", true, now); return false; }
+            uint protocol, session;
+            long timeout;
+            string reason = CheckHello(h, out protocol, out session, out timeout);
+            if (reason == null) reason = StartSession(ctl, h, protocol, session, timeout, now);
+            if (reason != null) { Refuse(ctl, reason, true, now); return false; }
+            foreach (Candidate other in _candidates) Retire(other.Ctl, "busy", now);
+            _candidates.Clear();
+            return false;
+        }
+
+        /// <summary>Host: closes a candidate whose handshake failed, with a bye when <paramref name="bye"/> is set, and reports it.</summary>
+        private void Refuse(Ctl ctl, string reason, bool bye, long now)
+        {
+            Retire(ctl, bye ? reason : null, now);
+            _events.Add(new LinkEvent.HandshakeFailed(reason));
         }
 
         private void PollControl(long now)
@@ -571,9 +684,13 @@ namespace Patodois.RewriteLink
             if (b != null) { reason = "peer said bye: " + b.Reason; return true; }
             if (_state == State.Handshake)
             {
+                // Guest: the host's hello. (A host reads the first line of a candidate in ReadCandidate.)
                 var h = msg as Control.Hello;
                 if (h == null) { reason = "expected hello"; bye = true; return true; }
-                reason = OnHello(h, now);
+                uint protocol, session;
+                long timeout;
+                reason = CheckHello(h, out protocol, out session, out timeout);
+                if (reason == null) reason = StartSession(_ctl, h, protocol, session, timeout, now);
                 bye = reason != null;
                 return bye;
             }
@@ -622,9 +739,13 @@ namespace Patodois.RewriteLink
             return false; // an Unknown type is ignored
         }
 
-        /// <summary>Returns null on success, else the reason the handshake failed.</summary>
-        private string OnHello(Control.Hello h, long now)
+        /// <summary>
+        /// The checks of CONTRACT.md 6 on the peer's hello, the token first (6.2); null when it passes, else the reason the handshake failed. A host
+        /// also chooses the version and a new session number.
+        /// </summary>
+        private string CheckHello(Control.Hello h, out uint protocol, out uint session, out long timeout)
         {
+            protocol = 0; session = 0; timeout = 0;
             // A host with a token looks at it first, before the role, the versions or any range, and answers with this one word (CONTRACT.md 6.2):
             // a peer that did not show the token learns nothing else about the host.
             if (_role == Role.Host && _tokenBytes != null && !TokenMatches(h.Token)) return "unauthorized";
@@ -632,7 +753,6 @@ namespace Patodois.RewriteLink
             if (h.UdpPort == 0) return "peer announced udp_port 0";
             if (h.HeartbeatMs < Wire.MinHeartbeatMs || h.HeartbeatMs > Wire.MaxHeartbeatMs)
                 return "peer announced heartbeat_ms " + h.HeartbeatMs + ", outside " + Wire.MinHeartbeatMs + ".." + Wire.MaxHeartbeatMs;
-            uint protocol, session;
             if (_role == Role.Host)
             {
                 int v = Wire.Negotiate(Wire.MinProtocolVersion, Wire.ProtocolVersion, (int)h.MinProtocol, (int)h.Protocol);
@@ -652,12 +772,22 @@ namespace Patodois.RewriteLink
                 protocol = h.Protocol;
                 session = h.Session.Value;
             }
-            long timeout = Math.Max(_cfgTimeoutMs, 4L * h.HeartbeatMs);
+            timeout = Math.Max(_cfgTimeoutMs, 4L * h.HeartbeatMs);
+            return null;
+        }
+
+        /// <summary>
+        /// Makes <paramref name="ctl"/> the session's connection: a host queues its reply, <see cref="LinkEvent.Connected"/> is reported and the first
+        /// heartbeat goes out. Null on success; else the reason, and nothing
+        /// has changed (the host's reply did not fit a line).
+        /// </summary>
+        private string StartSession(Ctl ctl, Control.Hello h, uint protocol, uint session, long timeout, long now)
+        {
             if (_role == Role.Host)
             {
-                if(!_ctl.Queue(MakeHello(protocol, session))) { _lastError="local hello control line too long";return _lastError; }
+                if (!ctl.Queue(MakeHello(protocol, session))) { _lastError = "local hello control line too long"; return _lastError; }
                 LinesSent++;
-                _ctl.Flush();
+                ctl.Flush();
             }
             ResetSession();
             _peer = new PeerInfo
@@ -666,6 +796,7 @@ namespace Patodois.RewriteLink
                 HeartbeatMs = h.HeartbeatMs, TimeoutMs = timeout,
             };
             _peerEp = new IPEndPoint(IPAddress.Loopback, (int)h.UdpPort);
+            _ctl = ctl;
             _timeoutMs = timeout;
             _state = State.Live;
             _lastError = null;
@@ -713,7 +844,10 @@ namespace Patodois.RewriteLink
 
         private void PollUdp(long now)
         {
-            for (int n = 0; n < 4096; n++)
+            // Bounded per poll (CONTRACT.md 2, revision 8): the rest stay in the socket's buffer for the next poll. With no session none of them
+            // can be the peer's; with one, the bound is what a flood from other senders can cost a poll.
+            int budget = _state == State.Live ? MaxDatagramsPerPoll : MaxDatagramsWithoutSession;
+            for (int n = 0; n < budget; n++)
             {
                 int len;
                 try
@@ -836,6 +970,14 @@ namespace Patodois.RewriteLink
 
         private void PollTimers(long now)
         {
+            // Host: a candidate that nothing displaced has the host's own timeout for its first line (CONTRACT.md 2 and 6, revision 8).
+            for (int i = 0; i < _candidates.Count;)
+            {
+                Candidate c = _candidates[i];
+                if (now - c.Since <= _cfgTimeoutMs) { i++; continue; }
+                _candidates.RemoveAt(i);
+                Refuse(c.Ctl, "no hello before the timeout", true, now);
+            }
             if (_state == State.Handshake && now - _since > _cfgTimeoutMs)
             {
                 End("no hello before the timeout", true);
@@ -997,11 +1139,18 @@ namespace Patodois.RewriteLink
 
         }
 
-        /// <summary>Ends the session with a bye (the caller knows; no <see cref="LinkEvent.Lost"/> is reported for it).</summary>
+        /// <summary>
+        /// Ends the session with a bye (the caller knows; no <see cref="LinkEvent.Lost"/> is reported for it). A guest reconnects after
+        /// <see cref="LinkConfig.ReconnectMs"/>. A host with no session closes the connections it holds that have not sent their hello yet, with the
+        /// same bye.
+        /// </summary>
         public void Disconnect(string reason)
         {
             lock (_gate)
             {
+                long now = Now();
+                foreach (Candidate c in _candidates) Retire(c.Ctl, reason ?? "", now);
+                _candidates.Clear();
                 if (_state == State.Handshake || _state == State.Live)
                 {
                     End(reason ?? "", true);
@@ -1022,6 +1171,8 @@ namespace Patodois.RewriteLink
                 if (_endpointWritten) { Endpoint.DeleteIfOwn(_endpointPath, _controlPort, _tokenBytes); _endpointWritten = false; }
                 long now = Now();
                 if (_state == State.Connecting && _connecting != null) { try { _connecting.Close(); } catch (SocketException) { } }
+                foreach (Candidate c in _candidates) Retire(c.Ctl, "closing", now);
+                _candidates.Clear();
                 if ((_state == State.Handshake || _state == State.Live) && _ctl != null) Retire(_ctl, "closing", now);
                 _ctl = null;
                 _state = State.Idle;

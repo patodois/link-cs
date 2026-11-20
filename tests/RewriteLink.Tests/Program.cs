@@ -17,6 +17,7 @@ namespace Patodois.RewriteLink.Tests
             PixelTests.Run();
             PixelSafety.Run();
             TokenTests.Run();
+            Rev8Tests.Run();
             VectorTests.Run();
             T.Cleanup();
             Console.WriteLine();
