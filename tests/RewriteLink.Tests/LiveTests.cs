@@ -142,8 +142,10 @@ namespace Patodois.RewriteLink.Tests
                     stranger.Bind(new IPEndPoint(IPAddress.Loopback, 0));
                     byte[] b = Wire.Encode(new Hdr(1, 0, p.Host.Peer.Session, 1, Wire.NowUs()), new Wire.PoseMsg(new[] { Wire.Pose.Identity(1, Wire.NowUs()) }));
                     stranger.SendTo(b, new IPEndPoint(IPAddress.Loopback, p.Host.UdpPort));
-                    Check(Until(500, () => { p.Pump(); return p.Host.Foreign >= 1; }), "counted as foreign");
+                    Until(300, () => { p.Pump(); return false; });
                     Eq(p.H<LinkEvent.Poses>(), 0, "the stranger's pose is ignored");
+                    // revision 8: the host's socket is connected to the guest's address, so the system drops the stranger's datagram before it is read
+                    Eq(p.Host.Foreign, 0L, "not even read");
                 }
             });
 

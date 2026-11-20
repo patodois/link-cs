@@ -251,9 +251,16 @@ namespace Patodois.RewriteLink
         private readonly int _maxCollisionTriangles;
         private readonly long _heartbeatMs;
         private readonly Socket _listener; // host only
-        private readonly Socket _udp;
+        // The UDP socket and its port, for the session to come or the one in progress. While a session is live the socket is connected to the
+        // peer, so the system drops every other sender's datagrams before they are queued (CONTRACT.md 2, revision 8). It is never disconnected:
+        // on macOS dissolving the association rebinds the socket to 0.0.0.0, and on Linux it releases a port the system chose. When a session on
+        // a connected socket ends, the socket is replaced by a new, unconnected one (see RenewUdp), on a new automatic port or on the same fixed
+        // port, and the next hello announces its port. (.NET refuses a second Connect on a socket, so the same socket is not connected again.)
+        private Socket _udp;
+        private int _udpPort;
+        private bool _udpConnected;
+        private readonly int _cfgUdpPort;
         private readonly int _controlPort;
-        private readonly int _udpPort;
         private readonly Stopwatch _clock = Stopwatch.StartNew();
         private readonly int _collisionBurst;
         private readonly byte[] _rx = new byte[2 * Wire.MaxDatagram];
@@ -324,20 +331,12 @@ namespace Patodois.RewriteLink
             _maxCollisionTriangles = cfg.MaxCollisionTriangles;
             _helloToken = cfg.Token;
             _heartbeatMs = Math.Max(Wire.MinHeartbeatMs, Math.Min(Wire.MaxHeartbeatMs, cfg.HeartbeatMs));
+            _cfgUdpPort = cfg.UdpPort;
             _nextTry = Now();
             Socket u = null, l = null;
             try
             {
-                u = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
-                // Collision snapshots arrive in bursts (CONTRACT.md 2); the OS may grant less, or refuse.
-                try { u.ReceiveBufferSize = Wire.RecvBufferBytes; } catch (SocketException) { }
-                u.Bind(new IPEndPoint(IPAddress.Loopback, cfg.UdpPort));
-                u.Blocking = false;
-                if (!Posix.IsUnix)
-                {
-                    // ICMP port-unreachable from an earlier send must not make ReceiveFrom fail (SIO_UDP_CONNRESET off)
-                    try { u.IOControl(-1744830452, new byte[] { 0, 0, 0, 0 }, null); } catch (Exception) { }
-                }
+                u = NewUdp(cfg.UdpPort);
                 if (role == Role.Host)
                 {
                     l = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
@@ -386,6 +385,27 @@ namespace Patodois.RewriteLink
             }
         }
 
+        /// <summary>A non-blocking UDP socket bound to 127.0.0.1:<paramref name="port"/> (0: a port the system chooses).</summary>
+        private static Socket NewUdp(int port)
+        {
+            var u = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+            try
+            {
+                // Collision snapshots arrive in bursts (CONTRACT.md 2); the OS may grant less, or refuse.
+                try { u.ReceiveBufferSize = Wire.RecvBufferBytes; } catch (SocketException) { }
+                u.Bind(new IPEndPoint(IPAddress.Loopback, port));
+                u.Blocking = false;
+                if (!Posix.IsUnix)
+                {
+                    // ICMP port-unreachable from an earlier send must not make ReceiveFrom fail (SIO_UDP_CONNRESET off); where it still
+                    // does, the error is a lost datagram (PollUdp)
+                    try { u.IOControl(-1744830452, new byte[] { 0, 0, 0, 0 }, null); } catch (Exception) { }
+                }
+                return u;
+            }
+            catch { u.Close(); throw; }
+        }
+
         /// <summary>The absolute form of an endpoint path, resolved once; a path the runtime cannot resolve is kept as given, so that reading or
         /// writing it reports the error as before.</summary>
         private static string FullPath(string path)
@@ -415,7 +435,11 @@ namespace Patodois.RewriteLink
         public Role Role { get { return _role; } }
         /// <summary>Host: the control port actually bound.</summary>
         public int ControlPort { get { return _controlPort; } }
-        public int UdpPort { get { return _udpPort; } }
+        /// <summary>
+        /// This side's UDP port for the current session, or for the next one. With <see cref="LinkConfig.UdpPort"/> 0 it may differ from one session
+        /// to the next: the socket of a session is replaced by a new one when the session ends (CONTRACT.md 2, revision 8).
+        /// </summary>
+        public int UdpPort { get { lock (_gate) { return _udpPort; } } }
         /// <summary>True while there is a session to send on: false from a failed control write until the next <see cref="Poll()"/> ends the session.</summary>
         public bool IsConnected { get { lock (_gate) { return CanSend; } } }
         /// <summary>The peer of the current session, or null.</summary>
@@ -777,8 +801,8 @@ namespace Patodois.RewriteLink
         }
 
         /// <summary>
-        /// Makes <paramref name="ctl"/> the session's connection: a host queues its reply, <see cref="LinkEvent.Connected"/> is reported and the first
-        /// heartbeat goes out. Null on success; else the reason, and nothing
+        /// Makes <paramref name="ctl"/> the session's connection: a host queues its reply, then the UDP socket is connected to the peer (CONTRACT.md 2,
+        /// revision 8), <see cref="LinkEvent.Connected"/> is reported and the first heartbeat goes out. Null on success; else the reason, and nothing
         /// has changed (the host's reply did not fit a line).
         /// </summary>
         private string StartSession(Ctl ctl, Control.Hello h, uint protocol, uint session, long timeout, long now)
@@ -796,6 +820,7 @@ namespace Patodois.RewriteLink
                 HeartbeatMs = h.HeartbeatMs, TimeoutMs = timeout,
             };
             _peerEp = new IPEndPoint(IPAddress.Loopback, (int)h.UdpPort);
+            ConnectUdp();
             _ctl = ctl;
             _timeoutMs = timeout;
             _state = State.Live;
@@ -805,6 +830,54 @@ namespace Patodois.RewriteLink
             _events.Add(new LinkEvent.Connected(_peer.Copy()));
             SendHeartbeat();
             return null;
+        }
+
+        /// <summary>
+        /// Has the system deliver only the peer's datagrams from now on (CONTRACT.md 2, revision 8, a SHOULD). Best effort: a socket that cannot be
+        /// connected stays as it was, and the address rule and the per-poll bound still hold. The socket is new or has never been connected: a
+        /// session that ended on a connected socket replaced it (<see cref="RenewUdp"/>).
+        /// </summary>
+        private void ConnectUdp()
+        {
+            if (_udpConnected) return;
+            try { _udp.Connect(_peerEp); _udpConnected = true; }
+            catch (SocketException) { }
+            catch (InvalidOperationException) { }
+        }
+
+        /// <summary>
+        /// After a session on a connected socket: a new socket, so that the old one never has to be disconnected (CONTRACT.md 2, revision 8). With
+        /// port 0 configured it is on a new automatic port; with a fixed port the old socket is closed first and the new one binds the same port. The
+        /// next hello announces the new socket's port. If no socket can be had on the fixed port (another process took it in between), one on an
+        /// automatic port is used and <see cref="LastError"/> says so; if none at all, the old socket is kept.
+        /// </summary>
+        private void RenewUdp()
+        {
+            if (!_udpConnected) return;
+            Socket fresh;
+            try { fresh = NewUdp(0); }
+            catch (SocketException) { _lastError = "no new UDP socket could be bound for the next session"; return; } // the old one is kept
+            CloseQuietly(_udp);
+            if (_cfgUdpPort != 0)
+            {
+                // The automatic one is the spare, in case another process took the port in the moment it was free.
+                try
+                {
+                    Socket fixedPort = NewUdp(_cfgUdpPort);
+                    CloseQuietly(fresh);
+                    fresh = fixedPort;
+                }
+                catch (SocketException) { _lastError = "the configured UDP port could not be bound again; the next session uses a port the system chose"; }
+            }
+            _udp = fresh;
+            _udpPort = ((IPEndPoint)fresh.LocalEndPoint).Port;
+            _udpConnected = false;
+        }
+
+        private static void CloseQuietly(Socket s)
+        {
+            if (s == null) return;
+            try { s.Close(); } catch (SocketException) { } catch (ObjectDisposedException) { }
         }
 
         private bool TokenMatches(string shown)
@@ -839,13 +912,15 @@ namespace Patodois.RewriteLink
             _nextTry = _role == Role.Guest ? now + _reconnectMs : now;
             if (ctl != null) Retire(ctl, bye ? reason : null, now);
             ResetSession();
+            if (wasLive) RenewUdp();
             _events.Add(wasLive ? (LinkEvent)new LinkEvent.Lost(reason) : new LinkEvent.HandshakeFailed(reason));
         }
 
         private void PollUdp(long now)
         {
             // Bounded per poll (CONTRACT.md 2, revision 8): the rest stay in the socket's buffer for the next poll. With no session none of them
-            // can be the peer's; with one, the bound is what a flood from other senders can cost a poll.
+            // can be the peer's. With one, the socket is connected to the peer, so other senders' datagrams do not reach it where the system
+            // honours that; the bound is the backstop where it does not.
             int budget = _state == State.Live ? MaxDatagramsPerPoll : MaxDatagramsWithoutSession;
             for (int n = 0; n < budget; n++)
             {
@@ -855,7 +930,10 @@ namespace Patodois.RewriteLink
                     if (!_udp.Poll(0, SelectMode.SelectRead)) break;
                     len = _udp.ReceiveFrom(_rx, 0, _rx.Length, SocketFlags.None, ref _from);
                 }
-                catch (SocketException) { continue; } // e.g. ICMP port-unreachable from an earlier send, or a datagram too big for the buffer
+                // An unreachable peer port (ECONNREFUSED, WSAECONNRESET, which a connected socket in particular reports for an earlier send) is
+                // a lost datagram, not the end of the session; the watchdog decides (CONTRACT.md 2, revision 8). So is a datagram too big for the
+                // buffer. Each costs this poll one datagram of its budget.
+                catch (SocketException) { continue; }
                 catch (ObjectDisposedException) { break; }
                 if (_state != State.Live) { Foreign++; continue; }
                 var src = _from as IPEndPoint;
@@ -1005,10 +1083,14 @@ namespace Patodois.RewriteLink
             uint seq = _seq++;
             try
             {
-                _udp.SendTo(_tx, 0, len, SocketFlags.None, _peerEp);
+                // A connected socket sends without a destination: macOS and the BSDs refuse one there (EISCONN).
+                if (_udpConnected) _udp.Send(_tx, 0, len, SocketFlags.None);
+                else _udp.SendTo(_tx, 0, len, SocketFlags.None, _peerEp);
                 DatagramsSent++;
             }
-            catch (SocketException) { SendDropped++; } // refused or would block: the next tick replaces it
+            // Refused (an unreachable peer port, which a connected socket reports on a later send: a lost datagram, CONTRACT.md 2, revision 8) or
+            // would block: the next tick replaces it.
+            catch (SocketException) { SendDropped++; }
             catch (ObjectDisposedException) { SendDropped++; }
             return seq;
         }

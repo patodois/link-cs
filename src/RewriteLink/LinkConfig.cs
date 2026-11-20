@@ -10,7 +10,11 @@ namespace Patodois.RewriteLink
         public string Game;
         /// <summary>Host: TCP port to listen on (0 = any free port). Guest: the host's port to connect to.</summary>
         public int ControlPort = Wire.DefaultControlPort;
-        /// <summary>This side's UDP port (0 = any free port); announced in hello.</summary>
+        /// <summary>
+        /// This side's UDP port (0 = any free port); announced in hello. During a session the socket is connected to the peer and is never
+        /// disconnected, so when the session ends the link replaces it (CONTRACT.md 2, revision 8): with 0, by a socket on a new free port, which
+        /// the next hello announces; with a fixed port, by a new socket on the same port.
+        /// </summary>
         public int UdpPort = 0;
         /// <summary>Heartbeat period; a hello carries it and a peer accepts 10 to 10000 only, so the link clamps it to that range.</summary>
         public long HeartbeatMs = 250;

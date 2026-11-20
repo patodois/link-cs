@@ -203,6 +203,89 @@ namespace Patodois.RewriteLink.Tests
                 }
             });
 
+            // ------------------------------------------------------------------ the connected UDP socket (section 2)
+
+            Test("revision 8: the UDP socket is connected to the peer, and an automatic port is renewed for the next session", () =>
+            {
+                using (var host = NewHost())
+                using (var stranger = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp))
+                {
+                    stranger.Bind(Lo0);
+                    int firstPort = host.UdpPort;
+                    using (var r = new Raw(host.ControlPort))
+                    {
+                        Session(host, r);
+                        Check(UdpConnected(host), "connected during the session");
+                        byte[] beat = Beat(host.Peer.Session);
+                        stranger.SendTo(beat, new IPEndPoint(IPAddress.Loopback, host.UdpPort));
+                        r.Udp.SendTo(beat, new IPEndPoint(IPAddress.Loopback, host.UdpPort));
+                        Check(Until(2000, () => { host.Poll(); return host.DatagramsReceived == 1; }), "the peer's datagram arrives");
+                        Thread.Sleep(50);
+                        host.Poll();
+                        Eq(host.Foreign, 0L, "the stranger's datagram never reached the host: the system dropped it");
+                        r.Send("{\"type\":\"bye\"}\n");
+                        Check(Until(2000, () => { host.Poll(); return !host.IsConnected; }), "the session ends");
+                    }
+                    Check(!UdpConnected(host), "the next session's socket is not connected yet");
+                    int secondPort = host.UdpPort;
+                    Check(secondPort != firstPort, "a new automatic port: " + firstPort + " and " + secondPort);
+                    using (var r = new Raw(host.ControlPort))
+                    {
+                        Eq((int)Session(host, r).UdpPort, secondPort, "the next hello announces the new port");
+                        r.Udp.ReceiveTimeout = 2000;
+                        var buf = new byte[64];
+                        EndPoint from = new IPEndPoint(IPAddress.Any, 0);
+                        r.Udp.ReceiveFrom(buf, ref from);
+                        Eq(((IPEndPoint)from).Port, secondPort, "and its heartbeats come from it");
+                    }
+                }
+            });
+
+            Test("revision 8: a fixed UDP port is the port of every session", () =>
+            {
+                int port;
+                using (var probe = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp))
+                {
+                    probe.Bind(Lo0);
+                    port = ((IPEndPoint)probe.LocalEndPoint).Port;
+                }
+                using (var host = NewHost(c => c.UdpPort = port))
+                {
+                    for (int round = 0; round < 3; round++)
+                        using (var r = new Raw(host.ControlPort))
+                        {
+                            Eq((int)Session(host, r).UdpPort, port, "session " + round + " announces the fixed port");
+                            Check(UdpConnected(host), "connected");
+                            r.Udp.ReceiveTimeout = 2000;
+                            var buf = new byte[64];
+                            EndPoint from = new IPEndPoint(IPAddress.Any, 0);
+                            r.Udp.ReceiveFrom(buf, ref from);
+                            Eq(((IPEndPoint)from).Port, port, "heartbeats come from it");
+                            r.Send("{\"type\":\"bye\"}\n");
+                            Check(Until(2000, () => { host.Poll(); return !host.IsConnected; }), "the session ends");
+                            Eq(host.UdpPort, port, "the port stays");
+                            Eq(host.LastError, null, "the port could be bound again");
+                        }
+                }
+            });
+
+            Test("revision 8: an unreachable peer port is a lost datagram, not the end of the session", () =>
+            {
+                int gone;
+                using (var s = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp)) { s.Bind(Lo0); gone = ((IPEndPoint)s.LocalEndPoint).Port; }
+                using (var host = NewHost(c => c.HeartbeatMs = 10))
+                using (var r = new Raw(host.ControlPort))
+                {
+                    r.Send(Raw.HelloLine("guest", 1, 1, gone, 250));
+                    Check(Until(2000, () => { host.Poll(); return host.IsConnected; }), "a session whose peer port is closed");
+                    var events = new List<LinkEvent>();
+                    long end = Environment.TickCount64 + 500;
+                    while (Environment.TickCount64 < end) { host.Poll(events); Thread.Sleep(2); } // fifty heartbeats into a closed port
+                    Check(host.IsConnected && !events.OfType<LinkEvent.Lost>().Any(), "still live: " + string.Join(", ", events.Select(e => e.Kind)));
+                    Check(host.DatagramsSent + host.SendDropped > 20, "heartbeats were sent: " + host.DatagramsSent + " sent, " + host.SendDropped + " dropped");
+                }
+            });
+
         }
     }
 }
