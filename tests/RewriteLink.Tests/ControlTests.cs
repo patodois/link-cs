@@ -245,6 +245,19 @@ namespace Patodois.RewriteLink.Tests
                 Throws<WireException>(() => Control.Parse("{\"type\":\"despawn\",\"entity\":1,\"x\":{\"a\":[1e400]}}"), "at any depth");
             });
 
+            Test("revision 8: the parser's error texts quote nothing from the line", () =>
+            {
+                foreach (string line in new[]
+                {
+                    "{\"type\":\"hello\",\"token\":Zq7x}", "{\"type\":\"spawn\",\"entity\":1,\"provider\":\"Zq7x\",\"asset\":5}", "{\"type\":\"Zq7x",
+                    "{\"type\":\"bye\",\"Zq7x\" 1}", "{\"type\":\"bye\",\"reason\":\"Zq7x\\q\"}", "{\"type\":\"despawn\",\"entity\":1,\"x\":1e400,\"Zq7x\":1}",
+                    "{\"type\":\"input\",\"focus\":\"Zq7x\"}", "Zq7x", "{\"type\":\"hello\",\"role\":\"Zq7x\"}", "{\"type\":\"bye\",\"reason\":Zq7x}",
+                })
+                {
+                    try { Control.Parse(line); throw new Exception("accepted " + line); }
+                    catch (WireException e) { Check(!e.Message.Contains("Zq7x") && !e.Message.Contains("'"), "the text " + e.Message); }
+                }
+            });
         }
     }
 }

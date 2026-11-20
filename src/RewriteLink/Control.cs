@@ -114,7 +114,9 @@ namespace Patodois.RewriteLink
 
         /// <summary>
         /// Parses one line (with or without its line ending). Unknown types give <see cref="Unknown"/>; a line that is not a JSON object
-        /// with a string "type", or a known type with a missing or out-of-range field, throws <see cref="WireException"/>.
+        /// with a string "type", or a known type with a missing or out-of-range field, throws <see cref="WireException"/>. The exception's text is
+        /// fixed: it may name a field of the contract, never quote a value, a key, a character or a position of the line (CONTRACT.md 8, bye,
+        /// revision 8). Strings are handed on as sent; the link cleans text meant for people where it hands it to the application.
         /// </summary>
         public static Control Parse(string line)
         {
@@ -134,7 +136,7 @@ namespace Patodois.RewriteLink
                 case "hello":
                 {
                     string role = Str(o, "role");
-                    if (role != "host" && role != "guest") throw new WireException("bad control line: role");
+                    if (role != "host" && role != "guest") throw new WireException("bad control line: role is not host or guest");
                     var h = new Hello
                     {
                         Role = role == "host" ? Role.Host : Role.Guest, Game = Str(o, "game"),
@@ -154,7 +156,7 @@ namespace Patodois.RewriteLink
                 case "input":
                 {
                     string f = Str(o, "focus");
-                    if (f != "host" && f != "guest") throw new WireException("bad control line: focus");
+                    if (f != "host" && f != "guest") throw new WireException("bad control line: focus is not host or guest");
                     return new Input(f == "host" ? Role.Host : Role.Guest, OptStr(o, "reason"));
                 }
                 case "frame_channel":

@@ -99,7 +99,7 @@ namespace Patodois.RewriteLink
                     case 'n': Literal("null"); return null;
                     default:
                         if (c == '-' || (c >= '0' && c <= '9')) return Number();
-                        throw new JsonException("unexpected character '" + c + "'");
+                        throw new JsonException("unexpected character"); // a fixed text: nothing of the line is quoted (CONTRACT.md 8, bye, revision 8)
                 }
             }
 
