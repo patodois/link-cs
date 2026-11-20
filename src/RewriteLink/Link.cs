@@ -288,7 +288,12 @@ namespace Patodois.RewriteLink
 
         private bool _hasLastCamera;
         private uint _lastCamera;
+        /// <summary>The peer's live spawned entities, each with the time_us of the last pose used for it: 0 before the first, and again after a
+        /// second spawn of the entity (CONTRACT.md 7, revision 8).</summary>
         private readonly Dictionary<uint, ulong> _entities = new Dictionary<uint, ulong>();
+        /// <summary>The time_us of the last pose this side sent for each of its own entities, which the next one may not go below (CONTRACT.md 5,
+        /// revision 8). Forgotten on spawn, despawn and at the end of the session.</summary>
+        private readonly Dictionary<uint, ulong> _sentPoseTimes = new Dictionary<uint, ulong>();
         private bool _spawnIgnoredLogged;
         private bool _hasLastCollision;
         private uint _lastCollision;
@@ -310,6 +315,9 @@ namespace Patodois.RewriteLink
         public long UnknownEntity;
         /// <summary>Spawns ignored because the peer already had <see cref="Wire.MaxEntities"/> live entities.</summary>
         public long SpawnIgnored;
+        /// <summary>Poses this side was asked to send with a time_us lower than the last one it sent for the entity, and sent with that time
+        /// plus one microsecond instead (CONTRACT.md 5, revision 8).</summary>
+        public long PoseTimeRaised;
 
         // ---------------------------------------------------------------- construction
 
@@ -723,21 +731,20 @@ namespace Patodois.RewriteLink
             if (sp != null)
             {
                 // A second spawn of a live id replaces the first; a new id needs a free place.
-                if (!_entities.ContainsKey(sp.Entity))
+                if (!_entities.ContainsKey(sp.Entity) && _entities.Count >= Wire.MaxEntities)
                 {
-                    if (_entities.Count >= Wire.MaxEntities)
+                    SpawnIgnored++;
+                    if (!_spawnIgnoredLogged)
                     {
-                        SpawnIgnored++;
-                        if (!_spawnIgnoredLogged)
-                        {
-                            _spawnIgnoredLogged = true;
-                            Console.Error.WriteLine("RewriteLink: the peer has " + Wire.MaxEntities + " live entities; further spawns are ignored (entity "
-                                + sp.Entity + " and later ones)");
-                        }
-                        return false;
+                        _spawnIgnoredLogged = true;
+                        Console.Error.WriteLine("RewriteLink: the peer has " + Wire.MaxEntities + " live entities; further spawns are ignored (entity "
+                            + sp.Entity + " and later ones)");
                     }
-                    _entities[sp.Entity] = 0;
+                    return false;
                 }
+                // A new entity has no pose yet, and neither has one that replaces a live entity: its next pose is used whatever its time
+                // (CONTRACT.md 7 and 8, spawn, revision 8).
+                _entities[sp.Entity] = 0;
                 _events.Add(new LinkEvent.Spawn(sp));
                 return false;
             }
@@ -894,6 +901,7 @@ namespace Patodois.RewriteLink
             _focus = Role.Host;
             _hasLastCamera = false;
             _entities.Clear();
+            _sentPoseTimes.Clear();
             _spawnIgnoredLogged = false;
             _cq.Clear();
             _cqNext = 0;
@@ -977,11 +985,13 @@ namespace Patodois.RewriteLink
             if (pm != null)
             {
                 var fresh = new List<Wire.Pose>(pm.Poses.Count);
+                // In record order (CONTRACT.md 9.4): a pose older than the last one used is dropped, unless it has the TELEPORT flag, which starts
+                // the entity's order again at its own time (section 7, revision 8). An equal time is not older.
                 foreach (Wire.Pose pose in pm.Poses)
                 {
                     ulong last;
                     if (!_entities.TryGetValue(pose.Entity, out last)) { UnknownEntity++; continue; } // never spawned (or despawned): no state is kept
-                    if (pose.TimeUs >= last) { _entities[pose.Entity] = pose.TimeUs; fresh.Add(pose); }
+                    if (pose.TimeUs >= last || (pose.Flags & Wire.PoseTeleport) != 0) { _entities[pose.Entity] = pose.TimeUs; fresh.Add(pose); }
                     else Stale++;
                 }
                 if (fresh.Count > 0) _events.Add(new LinkEvent.Poses(header, fresh));
@@ -1109,7 +1119,15 @@ namespace Patodois.RewriteLink
             lock (_gate) { return Send(new Wire.CameraMsg(camera)); }
         }
 
-        /// <summary>Sends poses, at most <see cref="Wire.MaxPoses"/> per datagram. The entity must be spawned first.</summary>
+        /// <summary>
+        /// Sends poses, at most <see cref="Wire.MaxPoses"/> per datagram. The entity must be spawned first.
+        ///
+        /// An entity's pose times never go back (CONTRACT.md 5, revision 8): a pose whose <see cref="Wire.Pose.TimeUs"/> is lower than the last one
+        /// sent for its entity is sent with that time plus one microsecond instead, and counted in <see cref="PoseTimeRaised"/>; a wall clock that
+        /// steps back is carried that way until it has caught up. A pose with <see cref="Wire.PoseTeleport"/>, and the first pose after
+        /// <see cref="Spawn(Control.Spawn)"/> of the entity, may carry any time, and start the entity's order again; the receiver does the same.
+        /// The caller's poses are not changed: a raised one is sent from a copy.
+        /// </summary>
         public void SendPoses(IList<Wire.Pose> poses)
         {
             lock (_gate)
@@ -1119,10 +1137,29 @@ namespace Patodois.RewriteLink
                 {
                     int n = Math.Min(Wire.MaxPoses, poses.Count - i);
                     var part = new Wire.Pose[n];
-                    for (int k = 0; k < n; k++) part[k] = poses[i + k];
+                    for (int k = 0; k < n; k++) part[k] = Ordered(poses[i + k]);
                     Send(new Wire.PoseMsg(part));
                 }
             }
+        }
+
+        /// <summary>The pose as it is sent: with its time raised to the last one sent for its entity plus one microsecond if it would go back
+        /// (the largest u64 stays itself), and that time remembered.</summary>
+        private Wire.Pose Ordered(Wire.Pose p)
+        {
+            if (p == null) throw new ArgumentNullException("poses", "a pose is null");
+            ulong last;
+            if ((p.Flags & Wire.PoseTeleport) == 0 && _sentPoseTimes.TryGetValue(p.Entity, out last) && p.TimeUs < last)
+            {
+                p = new Wire.Pose
+                {
+                    Entity = p.Entity, Flags = p.Flags, TimeUs = last == ulong.MaxValue ? last : last + 1, Translation = p.Translation,
+                    Rotation = p.Rotation, Scale = p.Scale, Velocity = p.Velocity, AngularVelocity = p.AngularVelocity,
+                };
+                PoseTimeRaised++;
+            }
+            _sentPoseTimes[p.Entity] = p.TimeUs;
+            return p;
         }
 
         /// <summary>Queues a collision snapshot (<paramref name="triangles"/> holds 9 floats per triangle) and returns its query number.</summary>
@@ -1169,9 +1206,15 @@ namespace Patodois.RewriteLink
             lock (_gate) { Send(new Wire.FrameMsg(frame)); }
         }
 
+        /// <summary>Announces one of this side's entities. A spawn of a live entity replaces it, and the entity's next pose may carry any time
+        /// (CONTRACT.md 5 and 8, revision 8).</summary>
         public void Spawn(Control.Spawn spawn)
         {
-            lock (_gate) { SendControl(spawn); }
+            lock (_gate)
+            {
+                SendControl(spawn);
+                _sentPoseTimes.Remove(spawn.Entity);
+            }
         }
 
         public void Spawn(uint entity, string provider, string asset, string name)
@@ -1181,7 +1224,11 @@ namespace Patodois.RewriteLink
 
         public void Despawn(uint entity)
         {
-            lock (_gate) { SendControl(new Control.Despawn(entity)); }
+            lock (_gate)
+            {
+                SendControl(new Control.Despawn(entity));
+                _sentPoseTimes.Remove(entity);
+            }
         }
 
         /// <summary>Host: gives the focus to <paramref name="focus"/>. Guest: asks the host for it.</summary>

@@ -46,12 +46,13 @@ namespace Patodois.RewriteLink.Tests
                     var sp = p.HE.OfType<LinkEvent.Spawn>().First().Value;
                     Check(sp.Entity == 9 && sp.Provider == "Test" && sp.Asset == "demo/cube" && sp.Name == "Cube", "spawn fields");
 
-                    // a stale pose (older time) is dropped
+                    // revision 8: a pose older than the last one sent for its entity goes out with that time plus one microsecond (CONTRACT 5)
                     int before = p.H<LinkEvent.Poses>();
-                    long staleBefore = p.Host.Stale;
                     p.Guest.SendPoses(new[] { Wire.Pose.Identity(9, t - 1000) });
-                    Check(Until(300, () => { p.Pump(); return p.Host.Stale > staleBefore; }), "stale counted");
-                    Eq(p.H<LinkEvent.Poses>(), before, "stale pose dropped");
+                    Eq(p.Guest.PoseTimeRaised, 1L, "the sender raised it");
+                    Check(Until(2000, () => { p.Pump(); return p.H<LinkEvent.Poses>() > before; }), "the raised pose arrives");
+                    Eq(p.HE.OfType<LinkEvent.Poses>().Last().Values[0].TimeUs, t + 1, "with the last time plus one microsecond");
+                    Eq(p.Host.Stale, 0L, "nothing was stale");
 
                     // focus: the guest asks, the host grants
                     p.Guest.SetFocus(Role.Guest);

@@ -286,6 +286,74 @@ namespace Patodois.RewriteLink.Tests
                 }
             });
 
+            // ------------------------------------------------------------------ pose order (sections 5, 7, 8, 9.4)
+
+            Test("revision 8: a sender's pose times never go back; a teleport and a respawn start the order again on both sides", () =>
+            {
+                using (var p = new Pair())
+                {
+                    p.Guest.Spawn(3, "P", "a", null);
+                    Check(Until(2000, () => { p.Pump(); return p.H<LinkEvent.Spawn>() == 1; }), "spawn");
+                    Func<Wire.Pose, ulong> send = pose =>
+                    {
+                        int before = p.H<LinkEvent.Poses>();
+                        p.Guest.SendPoses(new[] { pose });
+                        Check(Until(2000, () => { p.Pump(); return p.H<LinkEvent.Poses>() > before; }), "the pose at " + pose.TimeUs + " arrives");
+                        return p.HE.OfType<LinkEvent.Poses>().Last().Values.Single().TimeUs;
+                    };
+                    const ulong t = 1000000;
+                    Eq(send(Wire.Pose.Identity(3, t)), t, "the first pose");
+                    var older = Wire.Pose.Identity(3, t - 10);
+                    Eq(send(older), t + 1, "an older one is sent with the last time plus one microsecond");
+                    Eq(older.TimeUs, t - 10, "the caller's pose is not changed");
+                    Eq(p.Guest.PoseTimeRaised, 1L, "and counted");
+                    var teleport = Wire.Pose.Identity(3, t - 500);
+                    teleport.Flags = Wire.PoseTeleport;
+                    Eq(send(teleport), t - 500, "a teleport keeps its time, and the receiver uses it");
+                    Eq(send(Wire.Pose.Identity(3, t - 500)), t - 500, "the order starts again at the teleport (an equal time is not older)");
+                    Eq(p.Guest.PoseTimeRaised, 1L, "neither was raised");
+                    p.Guest.Spawn(3, "P", "a", null);
+                    Check(Until(2000, () => { p.Pump(); return p.H<LinkEvent.Spawn>() == 2; }), "respawn");
+                    Eq(send(Wire.Pose.Identity(3, 5)), 5UL, "after a respawn any time, on both sides");
+                    Eq(send(Wire.Pose.Identity(3, ulong.MaxValue)), ulong.MaxValue, "the largest time");
+                    Eq(send(Wire.Pose.Identity(3, 7)), ulong.MaxValue, "the largest u64 stays itself");
+                    Eq(p.Guest.PoseTimeRaised, 2L, "raised again");
+                    p.Guest.Despawn(3);
+                    p.Guest.Spawn(3, "P", "a", null);
+                    Check(Until(2000, () => { p.Pump(); return p.H<LinkEvent.Spawn>() == 3; }), "despawn and spawn");
+                    Eq(send(Wire.Pose.Identity(3, 1)), 1UL, "a despawn forgets the time too");
+                }
+            });
+
+            Test("revision 8: a receiver drops a plain pose older than the last one used, after a teleport too", () =>
+            {
+                using (var host = NewHost())
+                using (var r = new Raw(host.ControlPort))
+                {
+                    Session(host, r);
+                    uint session = host.Peer.Session;
+                    r.Send("{\"type\":\"spawn\",\"entity\":5,\"provider\":\"P\",\"asset\":\"a\"}\n");
+                    var events = new List<LinkEvent>();
+                    Check(Until(2000, () => { host.Poll(events); return events.OfType<LinkEvent.Spawn>().Any(); }), "spawn");
+                    var to = new IPEndPoint(IPAddress.Loopback, host.UdpPort);
+                    Func<ulong, uint, bool> used = (time, flags) =>
+                    {
+                        var pose = Wire.Pose.Identity(5, time);
+                        pose.Flags = flags;
+                        int before = events.OfType<LinkEvent.Poses>().Count();
+                        long stale = host.Stale;
+                        r.Udp.SendTo(Wire.Encode(new Hdr(1, 0, session, 1, 0), new Wire.PoseMsg(new[] { pose })), to);
+                        Check(Until(2000, () => { host.Poll(events); return events.OfType<LinkEvent.Poses>().Count() > before || host.Stale > stale; }), "the pose is handled");
+                        return events.OfType<LinkEvent.Poses>().Count() > before;
+                    };
+                    Check(used(1000, 0), "the first");
+                    Check(!used(999, 0), "an older plain pose is dropped");
+                    Check(used(500, Wire.PoseTeleport), "an older teleport is used");
+                    Check(!used(499, 0), "and the order continues from it");
+                    Check(used(500, 0), "an equal time is not older");
+                }
+            });
+
         }
     }
 }
