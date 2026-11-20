@@ -608,8 +608,10 @@ namespace Patodois.RewriteLink
         /// exist), sized once before it is announced, never truncated or resized, and deleted by <see cref="Dispose"/> (which unmaps it first:
         /// Windows refuses to delete a file its own process maps). Writers are thread-safe, but one thread should do the writing.
         ///
-        /// Revision 8 (CONTRACT.md 9.6): on Windows the file must be on a local drive under a drive-letter path, which a receiver accepts; anywhere
-        /// else creating the writer throws <see cref="NotSupportedException"/>, and the sender has no pixel channel.
+        /// Revision 8 (CONTRACT.md 9.6): on Unix the file is readable and writable by its owner only (mode 0600) from the moment it exists at
+        /// its path (see <see cref="Posix.CreateOwnerOnly"/>); on Windows the per-user temporary directory's ACL keeps other users out. On Windows
+        /// the file must be on a local drive under a drive-letter path, which a receiver accepts; anywhere else creating the writer throws
+        /// <see cref="NotSupportedException"/>, and the sender has no pixel channel.
         /// </summary>
         public sealed class Writer : IDisposable
         {
@@ -647,7 +649,7 @@ namespace Patodois.RewriteLink
                 _depthOffset = withDepth ? Round64(colourEnd) : 0;
                 SlotSize = Round64(withDepth ? _depthOffset + (long)width * 4 * height : colourEnd);
                 long total = HeaderLen + (long)slots * SlotSize;
-                _file = new FileStream(Path, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.ReadWrite | FileShare.Delete); // IOException if it exists
+                _file = Posix.CreateOwnerOnly(Path); // IOException if it exists; owner-only from the start on Unix
                 bool acquired = false;
                 try
                 {

@@ -513,6 +513,29 @@ namespace Patodois.RewriteLink.Tests
                 Eq(back.Token, "abc\"d", "parsed back");
                 Eq(((Control.Hello)Control.Parse(new Control.Hello { Role = Role.Host, Game = "g", Protocol = 1, MinProtocol = 1, UdpPort = 5, HeartbeatMs = 250, TimeoutMs = 2000, Session = 1 }.ToLine())).Token, null, "a host's hello has none");
             });
+
+            Test("revision 8: an endpoint file must belong to the reader's effective user, where the runtime can tell", () =>
+            {
+                if (!Posix.IsUnix) Skip("Unix owners");
+                const string token = "owner-test-token-0123456789";
+                string path = TempPath("owner.json");
+                Endpoint.Write(path, 4242, token);
+                long me = Posix.EffectiveUser();
+                Check(me >= 0, "geteuid answers");
+                using (var fs = File.OpenRead(path)) Eq(Posix.Owner(fs.SafeFileHandle), me, "this runtime tells the owner, and the file is ours");
+                Eq(Endpoint.Read(path).ControlPort, 4242, "our own file is read");
+                Posix.ForceOwner = me + 1;
+                try
+                {
+                    try { Endpoint.Read(path); throw new Exception("a file of another user was accepted"); }
+                    catch (EndpointException e) { Check(e.Message.Contains("another user") && !e.Message.Contains(token), e.Message); }
+                }
+                finally { Posix.ForceOwner = null; }
+                Posix.ForceOwner = -1;
+                try { Eq(Endpoint.Read(path).ControlPort, 4242, "where the owner cannot be told, the mode decides alone"); }
+                finally { Posix.ForceOwner = null; }
+                File.Delete(path);
+            });
         }
     }
 }

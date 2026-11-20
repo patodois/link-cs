@@ -416,6 +416,33 @@ namespace Patodois.RewriteLink.Tests
                 }
             });
 
+            Test("revision 8: a pixel file is owner-only from the start, with the runtime's call and with libc's", () =>
+            {
+                if (Windows) Skip("Unix file modes");
+                foreach (bool libc in new[] { false, true })
+                {
+                    Posix.ForcePInvoke = libc;
+                    try
+                    {
+                        string dir = TempPath("mode");
+                        Directory.CreateDirectory(dir);
+                        string path = Path.Combine(dir, "w.frames");
+                        Func<string> names = () => string.Join(",", Directory.GetFileSystemEntries(dir).Select(Path.GetFileName).OrderBy(x => x));
+                        using (var w = new PixelFile.Writer(path, 4, 2, 3, false))
+                        {
+                            Eq(Posix.LastPath, libc ? "libc" : "runtime", "the way it was created");
+                            Eq(Convert.ToString((int)File.GetUnixFileMode(path) & 511, 8), "600", "mode");
+                            Eq(names(), "w.frames", "nothing else is left beside it");
+                            w.Write(new byte[32], null, 4, 2, 0, 1);
+                            Throws<IOException>(() => new PixelFile.Writer(path, 4, 2, 3, false), "an existing path is never opened");
+                            Eq(names(), "w.frames", "a refused writer leaves nothing either");
+                            using (var r = PixelFile.Reader.Open(path)) Check(r.ReadLatest(new Wire.FrameReady(1, 1, 0, 4, 2), false) != null, "the file reads");
+                        }
+                        Check(!File.Exists(path), "deleted by Dispose");
+                    }
+                    finally { Posix.ForcePInvoke = false; }
+                }
+            });
         }
 
         // ------------------------------------------------------------------ helpers

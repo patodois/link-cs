@@ -130,7 +130,8 @@ namespace Patodois.RewriteLink
         /// <summary>
         /// Reads and checks the endpoint file: the path names a regular file (symbolic links are followed; a directory, or a FIFO or device, which
         /// <c>netstandard2.0</c> can only tell by its size of 0, is refused before it is opened); on Unix its permissions grant nothing to the group or
-        /// to others (using <c>File.GetUnixFileMode</c>, .NET 7+; runtimes without a permission API refuse endpoint files); it is at most 4096 bytes;
+        /// to others (using <c>File.GetUnixFileMode</c>, .NET 7+; runtimes without a permission API refuse endpoint files), and, from revision 8, it
+        /// belongs to this process's effective user where the runtime can tell (<see cref="Posix.Owner"/>); it is at most 4096 bytes;
         /// its text is one control line (strict UTF-8, one trailing newline allowed) holding an object with a <c>control_port</c> integer 1 to 65535 and
         /// a <c>token</c> string of 1 to 256 bytes; other fields are ignored. Throws <see cref="EndpointException"/> otherwise, with a message that
         /// never contains the file's contents.
@@ -173,6 +174,12 @@ namespace Patodois.RewriteLink
                     int mode = Posix.Permissions(fs.SafeFileHandle);
                     if (mode < 0) throw new EndpointException("cannot verify the endpoint file permissions on this runtime");
                     if ((mode & 63) != 0) throw new EndpointException("the endpoint file's permissions allow the group or others to access it");
+                    // Revision 8 (CONTRACT.md 6.2, a SHOULD where the runtime can tell): the file belongs to this process's effective user. A reader that
+                    // can read other users' owner-only files (root, or one a capability or an ACL lets) would otherwise trust a file another user wrote
+                    // with mode 0600. A host writes the file as the user that runs it, so no correct host is refused. Where the runtime cannot tell the
+                    // owner (see Posix.Owner) the file is judged by its mode alone, as before revision 8.
+                    long owner = Posix.Owner(fs.SafeFileHandle), me = Posix.EffectiveUser();
+                    if (owner >= 0 && me >= 0 && owner != me) throw new EndpointException("the endpoint file belongs to another user");
                 }
                 while (n < buf.Length)
                 {
@@ -326,7 +333,7 @@ namespace Patodois.RewriteLink
             catch { handle.Dispose(); throw; }
         }
 
-        private static bool Runtime(MethodInfo m) { return !ForcePInvoke && m != null; }
+        private static bool Runtime(MethodBase m) { return !ForcePInvoke && m != null; }
 
         private static object Invoke(MethodInfo m, params object[] args)
         {
@@ -379,6 +386,136 @@ namespace Patodois.RewriteLink
             }
             LastPath = "libc";
             if (c_rename(from, to) != 0) Fail("rename");
+        }
+
+        // ------------------------------------------------------------------ owner-only creation (the pixel file, revision 8)
+
+        private static readonly Type OptionsType = typeof(FileStream).Assembly.GetType("System.IO.FileStreamOptions");
+        private static readonly ConstructorInfo StreamWithOptions = OptionsType == null ? null : typeof(FileStream).GetConstructor(new[] { typeof(string), OptionsType });
+        private static readonly PropertyInfo UnixCreateMode = OptionsType == null ? null : OptionsType.GetProperty("UnixCreateMode");
+
+        // link(2): two named arguments. It creates the second name and fails with EEXIST if it exists, which rename(2) would replace.
+        [DllImport("libc", EntryPoint = "link", SetLastError = true)]
+        private static extern int c_link(string from, string to);
+
+        /// <summary>
+        /// Creates <paramref name="path"/>, which must not exist (<see cref="IOException"/> otherwise), open for reading and writing and shared for
+        /// reading, writing and deleting. On Unix it is readable and writable by its owner only (mode 0600) from the moment it exists at the path
+        /// (CONTRACT.md 9.6, revision 8). On .NET 7+ that is the runtime's own exclusive open with that mode (<c>FileStreamOptions.UnixCreateMode</c>,
+        /// found by reflection): <c>open(O_CREAT | O_EXCL | O_RDWR, 0600)</c>. Elsewhere (Mono, Unity, .NET Framework on Unix, or when a test sets
+        /// <see cref="ForcePInvoke"/>) it is the endpoint file's method: the file is created in a new directory with mode 0700 beside the target,
+        /// set to 0600 before anything is written, then given its name with libc's <c>link</c> (which, unlike a rename, never replaces a file; where
+        /// the binding is missing, <see cref="File.Move(string, string)"/>), and the temporary name and directory are removed. On Windows the
+        /// per-user temporary directory's ACL keeps others out, and the file is created plainly.
+        /// </summary>
+        public static FileStream CreateOwnerOnly(string path)
+        {
+            const FileShare share = FileShare.ReadWrite | FileShare.Delete;
+            if (!IsUnix) return new FileStream(path, FileMode.CreateNew, FileAccess.ReadWrite, share);
+            if (Runtime(StreamWithOptions) && UnixCreateMode != null && ModeType != null)
+            {
+                LastPath = "runtime";
+                object options = Activator.CreateInstance(OptionsType);
+                OptionsType.GetProperty("Mode").SetValue(options, FileMode.CreateNew);
+                OptionsType.GetProperty("Access").SetValue(options, FileAccess.ReadWrite);
+                OptionsType.GetProperty("Share").SetValue(options, share);
+                UnixCreateMode.SetValue(options, Enum.ToObject(ModeType, 384)); // 0600; the umask can only take bits away
+                try { return (FileStream)StreamWithOptions.Invoke(new[] { path, options }); }
+                catch (TargetInvocationException e) { ExceptionDispatchInfo.Capture(e.InnerException).Throw(); throw; }
+            }
+            LastPath = "libc";
+            string full = Path.GetFullPath(path);
+            string dir = Path.GetDirectoryName(full), name = Path.GetFileName(full);
+            if (string.IsNullOrEmpty(dir) || string.IsNullOrEmpty(name)) throw new IOException("not a file path");
+            if (File.Exists(full) || Directory.Exists(full)) throw new IOException("the file exists");
+            string priv = Path.Combine(dir, "." + name + "." + Process.GetCurrentProcess().Id.ToString(CultureInfo.InvariantCulture) + "." + Tokens.RandomHex(8) + ".d");
+            string inner = Path.Combine(priv, name);
+            FileStream fs = null;
+            try
+            {
+                MakePrivateDirectory(priv);
+                fs = new FileStream(inner, FileMode.CreateNew, FileAccess.ReadWrite, share);
+                Chmod(inner, 384); // 0600, before anything is written; nobody else can reach the file in its 0700 directory
+                LinkNoReplace(inner, full);
+            }
+            catch
+            {
+                if (fs != null) fs.Dispose();
+                try { File.Delete(inner); } catch (Exception) { }
+                try { Directory.Delete(priv); } catch (Exception) { }
+                throw;
+            }
+            try { File.Delete(inner); } catch (Exception) { }
+            try { Directory.Delete(priv); } catch (Exception) { }
+            return fs;
+        }
+
+        /// <summary>Gives the file <paramref name="from"/> the second name <paramref name="to"/>, which must not exist (<see cref="IOException"/>).</summary>
+        private static void LinkNoReplace(string from, string to)
+        {
+            try
+            {
+                if (c_link(from, to) == 0) return;
+            }
+            catch (Exception e) when (e is DllNotFoundException || e is EntryPointNotFoundException || e is BadImageFormatException || e is PlatformNotSupportedException || e is MarshalDirectiveException)
+            {
+                File.Move(from, to); // throws IOException if the target exists
+                return;
+            }
+            int errno = Marshal.GetLastWin32Error();
+            if (errno == 17) throw new IOException("the file exists"); // EEXIST, 17 on Linux and macOS
+            throw new IOException("link failed (errno " + errno.ToString(CultureInfo.InvariantCulture) + ")");
+        }
+
+        // ------------------------------------------------------------------ the owner of a file (the endpoint file, revision 8)
+
+        // .NET's own native shim, which its FileStream uses on every Unix; present in .NET Core and .NET 5+, absent in Mono and Unity.
+        // int32_t SystemNative_FStat(intptr_t fd, FileStatus* output), where FileStatus starts with int32 Flags, int32 Mode, uint32 Uid, uint32 Gid.
+        [DllImport("libSystem.Native", EntryPoint = "SystemNative_FStat", SetLastError = true)]
+        private static extern int SystemNativeFStat(SafeFileHandle fd, [Out] byte[] status);
+
+        [DllImport("libc", EntryPoint = "geteuid")]
+        private static extern uint c_geteuid();
+
+        /// <summary>Tests only: the owner to report for every file instead of asking the runtime (to see a file of another user refused).</summary>
+        internal static long? ForceOwner;
+
+        /// <summary>
+        /// The user id that owns the open file, or -1 where the runtime cannot tell. <c>netstandard2.0</c> and .NET have no API for a file's owner,
+        /// so this asks .NET's native shim (<c>SystemNative_FStat</c>, through which the runtime itself looks at files on Unix) and trusts the answer
+        /// only if the mode it gives agrees with <c>File.GetUnixFileMode</c> on the same handle and names a regular file: a shim whose layout is not
+        /// the one this code knows is "cannot tell", not a wrong owner. Mono, Unity and .NET Framework have no such shim, and before .NET 7 there is
+        /// no mode to compare with: there the endpoint file is judged by its mode alone (and refused anyway where the mode cannot be read).
+        /// </summary>
+        public static long Owner(SafeFileHandle h)
+        {
+            if (ForceOwner.HasValue) return ForceOwner.Value;
+            if (!IsUnix) return -1;
+            int perms = Permissions(h);
+            if (perms < 0) return -1;
+            var status = new byte[512]; // FileStatus is about 130 bytes; room to spare
+            try
+            {
+                if (SystemNativeFStat(h, status) != 0) return -1;
+            }
+            catch (Exception e) when (e is DllNotFoundException || e is EntryPointNotFoundException || e is BadImageFormatException || e is PlatformNotSupportedException || e is MarshalDirectiveException)
+            {
+                return -1;
+            }
+            int mode = BitConverter.ToInt32(status, 4);
+            if ((mode & 0xF000) != 0x8000 || (mode & 511) != perms) return -1; // S_IFREG and the same permission bits, or not a layout this code knows
+            return BitConverter.ToUInt32(status, 8);
+        }
+
+        /// <summary>This process's effective user id (libc's <c>geteuid</c>), or -1 where it cannot be asked.</summary>
+        public static long EffectiveUser()
+        {
+            if (!IsUnix) return -1;
+            try { return c_geteuid(); }
+            catch (Exception e) when (e is DllNotFoundException || e is EntryPointNotFoundException || e is BadImageFormatException || e is PlatformNotSupportedException || e is MarshalDirectiveException)
+            {
+                return -1;
+            }
         }
 
         /// <summary>The permission bits (0 to 0777) of the open file, or -1 where the runtime cannot tell (before .NET 7).</summary>
