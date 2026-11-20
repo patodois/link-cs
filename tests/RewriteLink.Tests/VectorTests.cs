@@ -31,7 +31,7 @@ namespace Patodois.RewriteLink.Tests
         /// the vectors: run scripts/sync-link-vectors.sh REPO_DIR in the rewrite-bridge repository (it copies the directory and prints
         /// "VECTORS_DIGEST = ..."), paste that value here, then run the tests and sort out the new or changed vectors.
         /// </summary>
-        private const string VectorsDigest = "07cf745d30318403b1808b974f050914db061d78a4351683e0c20fc0284ceab8";
+        private const string VectorsDigest = "89fc38b3aaf18e095cc14e12bc8f008d3d54d0087bca48b202b81ebe5871f24f";
 
         /// <summary>Vectors this library fails, id -> why. Empty when it passes them all.</summary>
         private static readonly Dictionary<string, string> KnownDisagreements = new Dictionary<string, string>
@@ -94,6 +94,39 @@ namespace Patodois.RewriteLink.Tests
         }
 
         private static bool SkipLarge() { return Environment.GetEnvironmentVariable("RBL_VECTORS_SKIP_LARGE") == "1"; }
+
+        /// <summary>The platform names this runner answers to in a case's <c>only_on</c> and <c>skip_on</c> (revision 8 of the vectors).</summary>
+        private static string[] PlatformNames()
+        {
+            if (OperatingSystem.IsWindows()) return new[] { "windows" };
+            if (OperatingSystem.IsLinux()) return new[] { "unix", "linux" };
+            if (OperatingSystem.IsMacOS()) return new[] { "unix", "macos" };
+            return new[] { "unix" };
+        }
+
+        /// <summary>Why case <paramref name="c"/> does not run on this platform (its <c>only_on</c> names none of this platform's names, or its
+        /// <c>skip_on</c> names one), or null if it runs. Any case of any file may have either list.</summary>
+        private static string NotHere(Dictionary<string, object> c)
+        {
+            string[] names = PlatformNames();
+            string id = J.Str(c, "id", "?");
+            var only = J.Get(c, "only_on") as List<object>;
+            if (only != null && !only.Any(p => names.Contains(p as string))) return id + " (only on " + string.Join(", ", only) + ")";
+            var skip = J.Get(c, "skip_on") as List<object>;
+            if (skip != null && skip.Any(p => names.Contains(p as string))) return id + " (not on " + names[0] + ")";
+            return null;
+        }
+
+        /// <summary>Runs <paramref name="check"/> for every one of <paramref name="cases"/> that runs on this platform; the others are reported as skipped.</summary>
+        private static void RunCases(Report r, IEnumerable<Dictionary<string, object>> cases, Func<Dictionary<string, object>, string> check)
+        {
+            foreach (var c in cases)
+            {
+                string why = NotHere(c);
+                if (why != null) { r.Skipped.Add(why); continue; }
+                r.Record(c, Guard(() => check(c)));
+            }
+        }
 
         private static string Sha256Hex(byte[] data)
         {
@@ -277,7 +310,7 @@ namespace Patodois.RewriteLink.Tests
         private static void ControlVectors()
         {
             var r = new Report();
-            foreach (var c in Cases("control.json")) r.Record(c, Guard(() => CheckControl(c)));
+            RunCases(r, Cases("control.json"), CheckControl);
             r.Finish("control.json");
         }
 
@@ -428,7 +461,7 @@ namespace Patodois.RewriteLink.Tests
         private static void DatagramVectors()
         {
             var r = new Report();
-            foreach (var c in Cases("datagrams.json")) r.Record(c, Guard(() => CheckDatagram(c)));
+            RunCases(r, Cases("datagrams.json"), CheckDatagram);
             r.Finish("datagrams.json");
         }
 
@@ -581,10 +614,33 @@ namespace Patodois.RewriteLink.Tests
                         openPath = t.At("fifo.frames");
                         if (!MakeFifo(openPath)) return "skip:fifo";
                         break;
+                    // Revision 8, Windows (section 9.6, item 5): the exact text of the case's path, which names nothing of the runner's.
+                    case "literal": openPath = J.Str(c, "path", null) ?? throw new RunnerBug("no path"); break;
+                    // A valid copy of the file, named by its absolute drive-letter path in the verbatim form \\?\X:\...
+                    case "verbatim_drive":
+                    {
+                        CopyFixture(c, path);
+                        string abs = Path.GetFullPath(path);
+                        openPath = abs.StartsWith(@"\\?\", StringComparison.Ordinal) ? abs : @"\\?\" + abs;
+                        break;
+                    }
+                    // A valid copy of the file, named by its absolute path with every \ written as /.
+                    case "forward_slashes":
+                        CopyFixture(c, path);
+                        openPath = Path.GetFullPath(path).Replace('\\', '/');
+                        break;
                     default: throw new RunnerBug("path_kind " + J.Str(c, "path_kind", null));
                 }
                 string openErr;
+                var opening = Stopwatch.StartNew();
                 PixelFile.Reader reader = OpenReader(openPath, out openErr);
+                long took = opening.ElapsedMilliseconds;
+                // max_ms (revision 8): the open returns, with the file or a refusal, within that much wall time
+                if (c.ContainsKey("max_ms") && took > (long)J.U64(c["max_ms"]))
+                {
+                    if (reader != null) reader.Dispose();
+                    return "opening took " + took + " ms, more than " + J.U64(c["max_ms"]) + " ms";
+                }
                 using (reader)
                 {
                     switch (J.Str(c, "open", null))
@@ -652,7 +708,8 @@ namespace Patodois.RewriteLink.Tests
                 if (c.ContainsKey("writer")) continue;
                 string id = J.Str(c, "id", "?");
                 if (J.IsTrue(c, "large") && SkipLarge()) { r.Skipped.Add(id + " (large)"); continue; }
-                if (OperatingSystem.IsWindows() && c.ContainsKey("skip_on") && ((List<object>)c["skip_on"]).Contains("windows")) { r.Skipped.Add(id + " (windows)"); continue; }
+                string notHere = NotHere(c);
+                if (notHere != null) { r.Skipped.Add(notHere); continue; }
                 string res = Guard(() => CheckPixelReader(c));
                 if (res != null && res.StartsWith("skip:", StringComparison.Ordinal)) { r.Skipped.Add(id + " (" + res.Substring(5) + " not available here)"); continue; }
                 r.Record(c, res);
@@ -686,6 +743,13 @@ namespace Patodois.RewriteLink.Tests
                 }
                 using (var writer = new PixelFile.Writer(path, width, height, slots, depth))
                 {
+                    // file_mode (revision 8, Unix only): the permission bits right after creation, before any write
+                    string mode = J.Str(c, "file_mode", null);
+                    if (mode != null && !OperatingSystem.IsWindows())
+                    {
+                        int created = (int)File.GetUnixFileMode(path) & 511, wantMode = Convert.ToInt32(mode, 8);
+                        if (created != wantMode) return "the file was created with mode " + Convert.ToString(created, 8) + ", expected " + mode;
+                    }
                     var writes = (List<object>)w["writes"];
                     ulong done = 0; // accepted writes so far: a refused write uses no frame number
                     for (int i = 0; i < writes.Count; i++)
@@ -729,8 +793,7 @@ namespace Patodois.RewriteLink.Tests
         private static void PixelWriterVectors()
         {
             var r = new Report();
-            foreach (var c in Cases("pixelfiles.json"))
-                if (c.ContainsKey("writer")) r.Record(c, Guard(() => CheckPixelWriter(c)));
+            RunCases(r, Cases("pixelfiles.json").Where(c => c.ContainsKey("writer")), CheckPixelWriter);
             r.Finish("pixelfiles.json (writers)");
         }
 
@@ -742,6 +805,8 @@ namespace Patodois.RewriteLink.Tests
             var r = new Report();
             foreach (var c in Cases("sessions.json"))
             {
+                string notHere = NotHere(c);
+                if (notHere != null) { r.Skipped.Add(notHere); continue; }
                 string res;
                 var sw = Stopwatch.StartNew();
                 using (var s = new VSession(c)) res = s.Run((List<object>)c["steps"]);
@@ -761,6 +826,8 @@ namespace Patodois.RewriteLink.Tests
             var r = new Report();
             foreach (var c in Cases("endpoints.json"))
             {
+                string notHere = NotHere(c);
+                if (notHere != null) { r.Skipped.Add(notHere); continue; }
                 string res = Guard(() => CheckEndpoint(c));
                 if (res != null && res.StartsWith("skip:", StringComparison.Ordinal)) r.Skipped.Add(J.Str(c, "id", "?") + " (" + res.Substring(5) + ")");
                 else r.Record(c, res);
@@ -771,7 +838,6 @@ namespace Patodois.RewriteLink.Tests
         private static string CheckEndpoint(Dictionary<string, object> c)
         {
             bool windows = OperatingSystem.IsWindows();
-            if (c.ContainsKey("skip_on") && ((List<object>)c["skip_on"]).Contains("windows") && windows) return "skip:windows";
             using (var t = new TempDir("ep"))
             {
                 string path = t.At("endpoint.json");
@@ -870,7 +936,32 @@ namespace Patodois.RewriteLink.Tests
                 if (cfg.ContainsKey("token")) lc.Token = J.Str(cfg, "token", null);
                 _ut = host ? Link.Host(lc) : Link.Guest(lc);
                 _vars["peer_udp_port"] = ((IPEndPoint)_udp.LocalEndPoint).Port.ToString(CultureInfo.InvariantCulture);
+                // The UT's port at creation, which its first session announces; a capture replaces it, since a side's UDP port may differ
+                // from one session to the next (contract section 2, revision 8).
                 _vars["ut_udp_port"] = _ut.UdpPort.ToString(CultureInfo.InvariantCulture);
+            }
+
+            /// <summary>The UT's UDP port: the one its latest captured hello announced, or its port at creation.</summary>
+            private int UtUdpPort() { return int.Parse(_vars["ut_udp_port"], NumberStyles.None, CultureInfo.InvariantCulture); }
+
+            /// <summary>How long a step may wait: its max_ms (revision 8), or the default.</summary>
+            private static int StepWait(Dictionary<string, object> step) { return step.ContainsKey("max_ms") ? (int)J.U64(step["max_ms"]) : StepWaitMs; }
+
+            /// <summary>Revision 8: none of the step's excludes strings may occur in <paramref name="text"/>.</summary>
+            private static void Excludes(Dictionary<string, object> step, string what, string text)
+            {
+                var ex = J.Get(step, "excludes") as List<object>;
+                if (ex == null || text == null) return;
+                foreach (object x in ex)
+                    if (text.Contains((string)x)) throw new StepFail(what + " contains " + Show((string)x) + ": " + Show(text));
+            }
+
+            /// <summary>Every string in <paramref name="v"/>, at any depth.</summary>
+            private static void StringsOf(object v, List<string> into)
+            {
+                if (v is string) into.Add((string)v);
+                else if (v is List<object>) foreach (object x in (List<object>)v) StringsOf(x, into);
+                else if (v is Dictionary<string, object>) foreach (object x in ((Dictionary<string, object>)v).Values) StringsOf(x, into);
             }
 
             private static Socket NewUdp()
@@ -931,8 +1022,9 @@ namespace Patodois.RewriteLink.Tests
                         d["role"] = Control.RoleName(p.Role); d["game"] = p.Game; d["protocol"] = (long)p.Protocol; d["session"] = (long)p.Session; d["heartbeat_ms"] = p.HeartbeatMs;
                         break;
                     }
-                    case LinkEventKind.Lost: type = "lost"; break;
-                    case LinkEventKind.HandshakeFailed: type = "handshake_failed"; break;
+                    // The reason is not specified, so no vector matches it; excludes looks at it (revision 8).
+                    case LinkEventKind.Lost: type = "lost"; d["reason"] = ((LinkEvent.Lost)e).Reason; break;
+                    case LinkEventKind.HandshakeFailed: type = "handshake_failed"; d["reason"] = ((LinkEvent.HandshakeFailed)e).Reason; break;
                     case LinkEventKind.Camera:
                     {
                         var c = (LinkEvent.Camera)e;
@@ -1130,6 +1222,24 @@ namespace Patodois.RewriteLink.Tests
                         _conns[name] = new Conn { Sock = s };
                         break;
                     }
+                    // Revision 8: count connections named prefix + 0, 1, ..., opened one after the other without polling the UT; nothing is sent
+                    // on them and nothing is read until a step names one. A connect that cannot complete fails the case.
+                    case "connect_many":
+                    {
+                        string prefix = J.Str(step, "prefix", null) ?? throw new RunnerBug("no prefix");
+                        long count = (long)J.U64(step["count"]);
+                        for (long i = 0; i < count; i++)
+                        {
+                            var s = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
+                            try { s.Connect(new IPEndPoint(IPAddress.Loopback, _ut.ControlPort)); }
+                            catch (SocketException e) { s.Close(); throw new StepFail("connection " + prefix + i + " could not be made: " + e.SocketErrorCode); }
+                            s.Blocking = false;
+                            _conns[prefix + i.ToString(CultureInfo.InvariantCulture)] = new Conn { Sock = s };
+                        }
+                        break;
+                    }
+                    // Revision 8: the UT is not polled for ms milliseconds, as if its process had been stopped.
+                    case "pause": Thread.Sleep((int)J.U64(step["ms"])); break;
                     case "accept":
                     {
                         Socket got = null;
@@ -1218,7 +1328,7 @@ namespace Patodois.RewriteLink.Tests
                     case "send_datagram":
                     {
                         byte[] b = Unhex(SubstHex(J.Str(step, "hex", null)));
-                        var dest = new IPEndPoint(IPAddress.Loopback, _ut.UdpPort);
+                        var dest = new IPEndPoint(IPAddress.Loopback, UtUdpPort());
                         if (J.Str(step, "from", null) == "other")
                         {
                             if (_other == null) _other = NewUdp();
@@ -1266,8 +1376,9 @@ namespace Patodois.RewriteLink.Tests
             {
                 Conn c = ConnOf(step);
                 byte[] line = null;
-                if (!Wait(StepWaitMs, () => { Fill(c); line = TakeLine(c); return line != null; })) throw new StepFail("no line from the implementation");
+                if (!Wait(StepWait(step), () => { Fill(c); line = TakeLine(c); return line != null; })) throw new StepFail("no line from the implementation");
                 string text = Encoding.UTF8.GetString(line);
+                Excludes(step, "the line", text);
                 object v;
                 try { v = J.Parse(text.TrimEnd()); }
                 catch (J.JsonError e) { throw new StepFail("not JSON: " + Show(text) + ": " + e.Message); }
@@ -1287,10 +1398,8 @@ namespace Patodois.RewriteLink.Tests
                     {
                         object val;
                         if (!obj.TryGetValue((string)kv.Value, out val) || !(val is long) || (long)val < 0) throw new StepFail("captured value is not an integer");
-                        string s = ((long)val).ToString(CultureInfo.InvariantCulture);
-                        if (kv.Key == "ut_udp_port" && s != _ut.UdpPort.ToString(CultureInfo.InvariantCulture))
-                            throw new StepFail("hello announces udp_port " + s + ", the socket is " + _ut.UdpPort);
-                        _vars[kv.Key] = s;
+                        // A captured udp_port is not compared with the UT's socket: the port may change between sessions (revision 8).
+                        _vars[kv.Key] = ((long)val).ToString(CultureInfo.InvariantCulture);
                     }
                 }
             }
@@ -1322,7 +1431,7 @@ namespace Patodois.RewriteLink.Tests
                 }
                 int kind = step.ContainsKey("kind") ? (int)J.U64(step["kind"]) : like != null ? like[6] : -1;
                 var seqs = new List<uint>();
-                int utPort = _ut.UdpPort;
+                int utPort = UtUdpPort();
                 string bad = null;
                 bool done = Wait(timeout, () =>
                 {
@@ -1384,7 +1493,7 @@ namespace Patodois.RewriteLink.Tests
             {
                 string ty = J.Str(step, "event", null);
                 int count = step.ContainsKey("count") ? (int)J.U64(step["count"]) : 1;
-                if (!Wait(StepWaitMs, () => _events.Count(e => e.Type == ty) >= count))
+                if (!Wait(StepWait(step), () => _events.Count(e => e.Type == ty) >= count))
                     throw new StepFail("no " + count + " " + ty + " event(s); queue holds [" + string.Join(", ", _events.Select(e => e.Type)) + "]");
                 int taken = 0;
                 for (int i = 0; taken < count;)
@@ -1397,6 +1506,9 @@ namespace Patodois.RewriteLink.Tests
                         string err = MatchOk(rec.Data, step["match"]);
                         if (err != null) throw new StepFail(ty + " event " + taken + ": " + err);
                     }
+                    var texts = new List<string>();
+                    StringsOf(rec.Data, texts);
+                    foreach (string t in texts) Excludes(step, ty + " event " + taken, t);
                     taken++;
                 }
             }

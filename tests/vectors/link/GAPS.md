@@ -145,3 +145,56 @@ Vector ids below are prefixes; `ctl.*` is `control.json`, `dg.*` is `datagrams.j
     in the `Lost` event of all four); only `"busy"` is fixed by the contract. Rule (a), section 8 (`bye`): free
     text, only `"busy"` is fixed, a receiver must not branch on the rest. The vectors check that a reason is a
     string (`$string`), never what it says.
+
+## Revision 8: what the shared vectors do not cover
+
+Revision 8 (contract section 12) settles nine places where revision 7 was silent or let a local process with no
+token hold up a host. They are all local behaviour, so most can only be seen through sockets and files, and some
+not at all from outside. The vectors added for them (all with a `section` ending in `(revision 8)`): `ctl.json.number_*`
+and `ctl.bad.number_*` (numbers), `dg.pose.one_*` (records the session vectors send and expect), `pf.bad.path_*` and
+`pf.read.path_*` (Windows paths), `pw.file_is_owner_only`, and in `sessions.json` `*.handshake.*candidate*`,
+`*.handshake.fifth_*`, `*.flood.*`, `*.udp.second_session_*`, `*.udp.pose_*`, `*.sends.pose_*`, `*.watchdog.*pause*`,
+`*.handshake.own_pause_*`, `*_not_echoed` and `*_control_characters_replaced`. What they leave out, and why:
+
+1. **Bounds per poll** (section 2). At most 8 accepts per poll, at most 16 closing sockets, at most 1024 datagrams
+   per poll with a session and 64 without: a raw peer cannot tell one poll of the implementation from the next, and
+   how many datagrams are waiting depends on each system's receive buffer (Linux grants about 200 KiB of the 4 MiB
+   asked for). Whether the oldest closing socket is closed at once, without its drain, is not visible either. The
+   vectors show the outcome only: `sess.host.flood.*` (40 connections that never read: the session goes on, a guest
+   gets in, every connection is answered). Each implementation tests the numbers in its own suite (Rust: the
+   `link.rs` unit tests `a_poll_accepts_at_most_eight_connections`, `a_host_holds_at_most_sixteen_closing_sockets`
+   and `datagrams_read_per_poll_are_bounded`).
+2. **Candidates** (section 2). Whether the application hears of a candidate closed with `busy` or displaced is the
+   implementation's choice, so no vector looks at events then. The reading order (a connection is read as soon as it
+   is accepted) shows only through `sess.host.flood.guest_gets_in_after_a_flood`.
+3. **The connected UDP socket** (section 2, a SHOULD). A datagram from another address is dropped either by the
+   system, before it is queued, or by the address rule: a raw peer cannot tell which, so
+   `sess.host.udp.from_other_address_dropped` holds for both. The vectors require that a side uses the port its
+   `hello` announced for that session, not that the port changes; a new socket per session where the port was
+   automatic is tested in each suite.
+4. **Unreachable-port errors** (section 2). They need the peer's UDP port to go away during a session, and only some
+   systems report them; the runner has no step that closes its UDP socket. Each suite tests that the session goes on.
+5. **Pose order** (sections 5, 7, 9.4). Covered on both sides, except the counter a sender keeps of the times it
+   raised (no runner sees it) and a sender's last time at the largest 64-bit value, which stays itself.
+6. **Windows paths** (section 9.6, item 5). The vectors run on Windows only. A path the receiver fails to refuse is
+   still refused by the later checks (no such file, not a regular file), so the vectors tell the rule apart by time
+   (`max_ms`): only a receiver that refuses before any file-system call answers at once for a UNC path. The SHOULD
+   (`GetDriveType`, a drive that is not local) and the MAYs (`GetFinalPathNameByHandle`, `statfs` on Unix) have no
+   vector: a runner would need a network drive or a directory link to a share. Neither has the sender's rule (no
+   `frame_channel` when the temporary directory is not on a local drive).
+7. **A side that was not running** (sections 6, 7). Covered for the watchdog, a host's candidate and a guest's wait
+   for `hello`, with `pause`. A machine that sleeps looks the same to the implementation. Polling less often than the
+   timeout is not conforming, so no vector does it.
+8. **Who owns the files** (sections 6.2, 9.6). The endpoint file's owner check needs a file that belongs to another
+   user, which only an administrator can make; no vector. (The Rust suite tests the comparison:
+   `the_endpoint_file_must_belong_to_the_reader`.) The pixel file's mode is covered on Unix (`pw.file_is_owner_only`);
+   on Windows the per-user directory's ACL decides and no vector checks it.
+9. **Texts** (sections 6.2, 8). A finite set of lines cannot prove that a text is fixed. The vectors put markers in
+   the refused lines (`@`, `Zq7x`, `98765`, `4321`) and check that neither the `bye` nor the event quotes them. A
+   position in the line is not checked: a fixed text may hold digits of its own. Cleaning is checked where a runner
+   sees the text (`game`, a `spawn` name, the reason of a `lost` or `handshake_failed`); the `reason` of an `input` is
+   not reported by any event the runner reads. An implementation that does not hand a peer's text to the application
+   at all passes those vectors, as the contract allows.
+
+No vector of revision 7 changed: regenerating them gave the same bytes, and only the `contract` label of each file
+(`v1 revision 8`) and `SHA256SUMS` differ.
