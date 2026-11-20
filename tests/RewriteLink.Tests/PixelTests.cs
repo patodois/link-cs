@@ -369,6 +369,53 @@ namespace Patodois.RewriteLink.Tests
                 Contention(true);
                 Contention(false); // the same race with no lock check, to show that the writer does tear what is being read
             });
+
+            // ------------------------------------------------------------------ revision 8 (CONTRACT.md 9.6)
+
+            Test("revision 8: Windows pixel paths are drive-letter paths to files (the rule, on every platform)", () =>
+            {
+                foreach (string ok in new[]
+                {
+                    @"C:\Users\me\AppData\Local\Temp\rewrite-bridge-1-guest-0.frames", "C:/Users/me/AppData/Local/Temp/x.frames", @"c:\x", @"\\?\C:\Users\me\x.frames",
+                    @"C:\Temp\console.frames", @"C:\Temp\COM10.frames", @"C:\CON\x.frames", "C:\\Temp\\ab\u00e9", @"C:\Temp\LPT0",
+                })
+                    Check(PixelFile.IsWindowsDriveLetterPath(ok), "accepted: " + ok);
+                foreach (string bad in new[]
+                {
+                    @"\\server\share\x.frames", @"\\127.0.0.1\c$\x.frames", "//server/share/x.frames", @"\\?\UNC\server\share\x.frames", @"\\.\pipe\rewrite-bridge",
+                    @"\\.\C:\x.frames", @"\\?\GLOBALROOT\Device\HarddiskVolume1\x.frames", @"\\?\Volume{01234567-89ab-cdef-0123-456789abcdef}\x.frames",
+                    @"\\?\C:/x.frames", @"\??\C:\x.frames", "C:x.frames", @"C:\Temp\NUL", @"C:\Temp\nul.frames", @"C:\Temp\CON.tar.gz", @"C:\Temp\aux ",
+                    @"C:\Temp\COM1.frames", @"C:\Temp\lpt9", @"C:\Temp\", "/tmp/x.frames", "", null, "1:\\x.frames",
+                })
+                    Check(!PixelFile.IsWindowsDriveLetterPath(bad), "refused: " + bad);
+            });
+
+            Test("revision 8: on Windows a receiver refuses other paths before any file call, and a drive that is not local; a sender too", () =>
+            {
+                if (!Windows) Skip("the Windows path rule applies on Windows");
+                using (var w = new PixelFile.Writer(TempPath("drive.frames"), 4, 2, 1, false))
+                {
+                    w.Write(new byte[32], null, 4, 2, 0, 1);
+                    using (var r = PixelFile.Reader.Open(@"\\?\" + w.Path)) Eq(r.Width, 4, "the verbatim drive-letter form opens");
+                    using (var r = PixelFile.Reader.Open(w.Path.Replace('\\', '/'))) Eq(r.Width, 4, "so does the form with forward slashes");
+                    foreach (string bad in new[] { @"\\192.0.2.1\rbl\x.frames", @"\\?\UNC\192.0.2.1\rbl\x.frames", @"\\.\pipe\rbl-test", @"C:\rbl\NUL.frames" })
+                    {
+                        var sw = Stopwatch.StartNew();
+                        Check(OpenRefused(bad), "refused: " + bad);
+                        Check(sw.ElapsedMilliseconds < 500, bad + " took " + sw.ElapsedMilliseconds + " ms: it was looked up");
+                    }
+                    PixelFile.ForceDriveType = DriveType.Network;
+                    try
+                    {
+                        Check(OpenRefused(w.Path), "a file on a network drive is refused");
+                        string path = TempPath("network.frames");
+                        Throws<NotSupportedException>(() => new PixelFile.Writer(path, 4, 2, 1, false), "a sender whose file would be on a network drive");
+                        Check(!File.Exists(path), "and creates nothing");
+                    }
+                    finally { PixelFile.ForceDriveType = null; }
+                }
+            });
+
         }
 
         // ------------------------------------------------------------------ helpers

@@ -90,6 +90,60 @@ namespace Patodois.RewriteLink
 
         private static bool IsAbsoluteHere(string path) { return IsAbsolute(path, IsWindows); }
 
+        private static readonly string[] ReservedDeviceNames = { "CON", "PRN", "AUX", "NUL" };
+
+        /// <summary>
+        /// CONTRACT.md 9.6, item 5 (revision 8), the part that needs no system call: is <paramref name="path"/> a drive-letter path, <c>X:\...</c> or
+        /// <c>X:/...</c> or the same as <c>\\?\X:\...</c>, whose last component is not a name Windows reserves for a device (CON, PRN, AUX, NUL,
+        /// COM1 to COM9, LPT1 to LPT9, with or without an extension, trailing spaces ignored)? Everything else, UNC paths (<c>\\server\share</c>,
+        /// <c>\\?\UNC\...</c>), device paths (<c>\\.\...</c>, <c>\\?\GLOBALROOT\...</c>) and every other <c>\\?\</c> form, is not. Plain string
+        /// work, so it is tested on every platform; only Windows uses it.
+        /// </summary>
+        internal static bool IsWindowsDriveLetterPath(string path)
+        {
+            if (path == null) return false;
+            bool verbatim = path.StartsWith(@"\\?\", StringComparison.Ordinal);
+            string rest = verbatim ? path.Substring(4) : path;
+            if (rest.Length < 4 || !((rest[0] >= 'A' && rest[0] <= 'Z') || (rest[0] >= 'a' && rest[0] <= 'z')) || rest[1] != ':') return false;
+            if (!(rest[2] == '\\' || (!verbatim && rest[2] == '/'))) return false;
+            // In the verbatim form / is not a separator but part of a name, which no file on a drive can have.
+            if (verbatim && rest.IndexOf('/') >= 0) return false;
+            string last = rest.Substring(Math.Max(rest.LastIndexOf('\\'), rest.LastIndexOf('/')) + 1);
+            if (last.Length == 0) return false;
+            int dot = last.IndexOf('.');
+            string stem = (dot < 0 ? last : last.Substring(0, dot)).TrimEnd(' ');
+            foreach (string r in ReservedDeviceNames) if (string.Equals(stem, r, StringComparison.OrdinalIgnoreCase)) return false;
+            if (stem.Length == 4 && stem[3] >= '1' && stem[3] <= '9'
+                && (string.Equals(stem.Substring(0, 3), "COM", StringComparison.OrdinalIgnoreCase) || string.Equals(stem.Substring(0, 3), "LPT", StringComparison.OrdinalIgnoreCase)))
+                return false;
+            return true;
+        }
+
+        /// <summary>Tests only: the drive type to report instead of asking the system (to see a network drive refused).</summary>
+        internal static DriveType? ForceDriveType;
+
+        /// <summary>
+        /// The drive of a path that passed <see cref="IsWindowsDriveLetterPath"/> is local: a fixed disk or a RAM disk, not a network drive or
+        /// removable media (CONTRACT.md 9.6, item 5, a SHOULD). It asks only about the drive's root (<see cref="DriveInfo.DriveType"/>, which is
+        /// GetDriveType), never about the path.
+        /// </summary>
+        private static bool WindowsDriveIsLocal(string path)
+        {
+            string rest = path.StartsWith(@"\\?\", StringComparison.Ordinal) ? path.Substring(4) : path;
+            DriveType t;
+            try { t = ForceDriveType ?? new DriveInfo(rest.Substring(0, 1)).DriveType; }
+            catch (Exception) { return false; }
+            return t == DriveType.Fixed || t == DriveType.Ram;
+        }
+
+        /// <summary>A receiver's check of a peer's pixel-file path on Windows, before anything touches the path (CONTRACT.md 9.6, item 5). The texts
+        /// do not quote the path.</summary>
+        private static void CheckWindowsReceiverPath(string path)
+        {
+            if (!IsWindowsDriveLetterPath(path)) throw new FormatException("the pixel file path is not a drive-letter path to a file, or names a device");
+            if (!WindowsDriveIsLocal(path)) throw new FormatException("the pixel file is not on a local drive");
+        }
+
         /// <summary>
         /// Checks a pixel file header against the file's length, as revision 4 and 5 say: the limits come first (width and height 1 to 16384,
         /// at most 2^26 pixels, 1 to 16 slots, stride exactly width * 4), then every size is computed with overflow checks. An unknown
@@ -200,7 +254,9 @@ namespace Patodois.RewriteLink
             }
 
             /// <summary>
-            /// Opens and checks the file as section 9.6 says: an absolute path to a regular file (a symlink, a directory, a FIFO, a device
+            /// Opens and checks the file as section 9.6 says. On Windows the path must first be a drive-letter path (or its <c>\\?\X:\</c> form) whose
+            /// last component names no device, on a fixed or RAM drive, all checked before any file-system call on the path (item 5, revision 8);
+            /// a directory link to a share inside such a path is not seen. Then: an absolute path to a regular file (a symlink, a directory, a FIFO, a device
             /// or a socket is refused), the header limits and checked arithmetic of <see cref="Validate"/>. The type is checked before the
             /// file is opened: a symlink or directory by its attributes, and a FIFO, device or socket by its size, which is 0 where a pixel
             /// file needs at least 64 bytes. On Linux and macOS the file is then opened with libc's <c>open(path, O_RDONLY | O_NONBLOCK)</c>, so a
@@ -216,6 +272,9 @@ namespace Patodois.RewriteLink
             public static Reader Open(string path)
             {
                 RequireLittleEndian();
+                // Before any file-system call: merely looking a UNC or device path up makes Windows go to the network, offering the user's
+                // credentials, or open a pipe or a device (CONTRACT.md 9.6, item 5, revision 8).
+                if (IsWindows) CheckWindowsReceiverPath(path);
                 if (!IsAbsoluteHere(path)) throw new FormatException("the pixel file path is not absolute: " + path);
                 FileStream fs;
                 try { fs = OpenChecked(path); }
@@ -548,6 +607,9 @@ namespace Patodois.RewriteLink
         /// Creates and fills a pixel file (the sending side). The file is created exclusively (<c>FileMode.CreateNew</c>: the path must not
         /// exist), sized once before it is announced, never truncated or resized, and deleted by <see cref="Dispose"/> (which unmaps it first:
         /// Windows refuses to delete a file its own process maps). Writers are thread-safe, but one thread should do the writing.
+        ///
+        /// Revision 8 (CONTRACT.md 9.6): on Windows the file must be on a local drive under a drive-letter path, which a receiver accepts; anywhere
+        /// else creating the writer throws <see cref="NotSupportedException"/>, and the sender has no pixel channel.
         /// </summary>
         public sealed class Writer : IDisposable
         {
@@ -574,6 +636,12 @@ namespace Patodois.RewriteLink
                 if (width > Wire.MaxFrameDim || height > Wire.MaxFrameDim) throw new ArgumentException("width and height are at most " + Wire.MaxFrameDim);
                 if ((long)width * height > Wire.MaxFramePixels) throw new ArgumentException("width * height is at most " + Wire.MaxFramePixels + " pixels");
                 Path = System.IO.Path.GetFullPath(path);
+                // A sender creates its pixel file under a path a receiver accepts (CONTRACT.md 9.6, revision 8): nothing is created otherwise.
+                if (IsWindows)
+                {
+                    try { CheckWindowsReceiverPath(Path); }
+                    catch (FormatException) { throw new NotSupportedException("the pixel file would not be on a local drive under a drive-letter path"); }
+                }
                 Width = width; Height = height; Slots = slots; Stride = width * 4; _depth = withDepth;
                 long colourEnd = SlotHeaderLen + (long)Stride * height;
                 _depthOffset = withDepth ? Round64(colourEnd) : 0;
