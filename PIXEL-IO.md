@@ -1,7 +1,9 @@
 # Pixel readers and presentation migration
 
-Contract revision 7 preserves protocol version 1, datagrams,
+Contract revisions 7 and 8 preserve protocol version 1, datagrams,
 file headers, slot offsets and depth layout. Writers retain their mapped publication path.
+Revision 8 adds that a writer creates its file owner-only (mode 0600) on Unix and on a local
+drive under a drive-letter path on Windows, and that a Windows reader opens only such paths.
 
 ## Presenting frames
 

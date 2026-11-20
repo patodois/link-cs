@@ -10,10 +10,10 @@ using Microsoft.Win32.SafeHandles;
 namespace Patodois.RewriteLink
 {
     /// <summary>
-    /// The shared-memory pixel file of CONTRACT.md section 9.6 (revision 7): a <see cref="Reader"/> for the receiving side (bounded Unix I/O
+    /// The shared-memory pixel file of CONTRACT.md section 9.6 (revision 8): a <see cref="Reader"/> for the receiving side (bounded Unix I/O
     /// or a Windows read-only map, checking the slot before presentation) and a <see cref="Writer"/> for the sending side.
     ///
-    /// Unix positional observations are not atomic acquire loads from the writer. See PIXEL-IO.md for the revision 7 limits.
+    /// Unix positional observations are not atomic acquire loads from the writer. See PIXEL-IO.md for the revision 7 limits; revision 8 adds the Windows path rule and the writer's file mode.
     /// THE SEQLOCK AND THE .NET MEMORY MODEL (writers and Windows mapped readers). The writer makes a slot's 64-bit <c>lock</c> odd while it writes and even afterwards; the
     /// reader copies and checks that the lock did not change. The contract asks for these orderings:
     ///

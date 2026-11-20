@@ -1,6 +1,6 @@
 # link-cs
 
-link-cs implements the **rewrite-bridge passthrough link protocol v1** (contract revision 7) for **C#/.NET and Unity mod developers**, enabling a game to act as a host or guest alongside other games. The protocol is defined by `docs/CONTRACT.md` in the
+link-cs implements the **rewrite-bridge passthrough link protocol v1** (contract revision 8) for **C#/.NET and Unity mod developers**, enabling a game to act as a host or guest alongside other games. The protocol is defined by `docs/CONTRACT.md` in the
 rewrite-bridge repository; this library is one implementation of it, next to the Rust crate,
 [link-java](https://github.com/patodois/link-java) and [link-c](https://github.com/patodois/link-c), and they talk to
 each other (see "Interop"). The API has the shape of link-java's `Link`.
@@ -9,8 +9,9 @@ each other (see "Interop"). The API has the shape of link-java's `Link`.
 
 - `netstandard2.0`, so it loads in .NET Framework 4.6.1 and later, Mono, .NET and Unity's .NET Standard 2.0 profile.
   C# 7.3 language level, **no package dependencies**: the BCL (sockets, `MemoryMappedFile`, `Volatile`, `Thread.MemoryBarrier`) and, on Unix,
-  libc through P/Invoke: `pread`, `preadv` and a read-only `open` for the readers (with managed fallbacks when the binding is missing), and
-  `mkdir`, `chmod` and `rename` for the endpoint file on runtimes without the .NET 7 calls.
+  libc through P/Invoke: `pread`, `preadv` and a read-only `open` for the readers (with managed fallbacks when the binding is missing),
+  `mkdir`, `chmod`, `rename` and `link` for the endpoint file and the pixel file on runtimes without the .NET 7 calls, and `geteuid` with
+  .NET's own `SystemNative_FStat` for the endpoint file's owner (revision 8; skipped where the runtime has neither).
 - Everything binds and connects to `127.0.0.1` only. No threads are created: you call `Poll()`.
 - The only `unsafe` code is in `PixelFile` (mapped writer/Windows pointers and pinned Unix I/O buffers).
 - Licence: MIT OR Apache-2.0.
@@ -90,7 +91,7 @@ guest.Close();
 | `SendCamera`, `SendPoses`, `SendCollision`, `SendFrame` | State datagrams. `SendCollision` takes 9 floats per triangle, copies them and queues the chunks (paced; a newer snapshot replaces the queued one); more than `Wire.MaxCollisionChunks` (4096) chunks, 925696 triangles, throws `ArgumentException` before anything is copied. `SendCamera` returns the `seq` a guest quotes in `FrameReady.CameraSeq`. |
 | `Spawn`, `Despawn`, `SetFocus`, `AnnounceFrames` | Control messages. |
 | `Disconnect(reason)`, `Close()` / `Dispose()` | `bye`, half-close, drain (CONTRACT 6.1). `Disconnect` ends the session and does not block; a guest then connects again by itself after `ReconnectMs`, and a host takes the next guest, so to stay disconnected call `Close`. `Close` may block for up to about 250 ms. |
-| `IsConnected`, `Peer`, `Focus`, `ControlPort`, `UdpPort`, `Malformed`, `Stale`, `Foreign`, `UnknownEntity`, `SpawnIgnored`, `SendDropped`, `DatagramsSent/Received`, `LinesSent/Received` | State and statistics. |
+| `IsConnected`, `Peer`, `Focus`, `ControlPort`, `UdpPort`, `Malformed`, `Stale`, `Foreign`, `UnknownEntity`, `SpawnIgnored`, `PoseTimeRaised`, `SendDropped`, `DatagramsSent/Received`, `LinesSent/Received` | State and statistics. `UdpPort` is the port of the current or next session: with `UdpPort` 0 configured it changes from one session to the next (revision 8). |
 | `Tokens.Generate()` / `Link.GenerateToken()`, `Tokens.Equal(byte[], byte[])` | Revision 6: a new token (32 bytes of the OS CSPRNG as 64 lowercase hex digits), and the contract's constant-time comparison. |
 | `Endpoint.Write(path, controlPort, token)`, `Endpoint.Read(path)` (an `EndpointInfo` with `ControlPort` and `Token`), `Endpoint.Delete(path)` | Revision 6: the endpoint file as a launcher or a test would use it. `Write` and `Read` throw `EndpointException` (the message never contains the token or the file's contents). |
 | `PixelFile.Writer`, `PixelFile.Reader` | The pixel file with the seqlock, colour and the optional linear depth plane. Read a `Frame` datagram with `reader.ReadLatest(frameReady, wantDepth)`, which checks its width and height against the file and the slot header. |
@@ -104,6 +105,48 @@ line and its `bye` arrived together), so the session may already be over when yo
 `IsConnected` is true, as the samples above do. A value the contract forbids throws `WireException`, and so do a required
 string that is null (`Spawn` without a provider, a `Bye` without a reason), `Wire.Decode` with a length outside its buffer and
 `Wire.Chunks` with a negative count or fewer floats than the count needs.
+
+## Contract revision 8
+
+Revision 8 changes no message, field, datagram or file layout; it settles nine local rules (section 12 of the contract), all implemented here, each
+with tests in `tests/RewriteLink.Tests/Rev8Tests.cs` beside the shared vectors:
+
+- **Candidates** (section 2). While no session is live a host holds up to 4 connections that have not sent a complete first line. The first whose
+  first line is an acceptable `hello` (the token first) becomes the session and the others are told `busy`; a refused first line closes that
+  connection only; a fifth connection displaces the oldest, even one that has sent part of a line, with a `bye` of its own reason. Each poll reads
+  the candidates it holds, oldest first, and then reads every connection it accepts at once. `busy` is answered only while a session is live.
+- **Bounds per poll** (sections 2, 6.1). At most 8 accepts per poll (the listen backlog is 128), at most 16 sockets closing (one more closes the
+  oldest at once, without its drain), at most 1024 datagrams read per poll with a session and 64 without.
+- **The UDP socket** (section 2). During a session it is connected to the peer's address, so the system drops other senders' datagrams before
+  they are read. It is never disconnected: when a session on it ends it is replaced by a new socket, on a new automatic port (`UdpPort` 0) or, for
+  a fixed port, on the same port after the old one is closed (.NET refuses a second `Connect` on a socket, so the same socket is not connected
+  again; if another process took the fixed port in that moment, the next session uses an automatic port and `LastError` says so). The next
+  `hello` announces the new port. An unreachable peer port on a send or a receive (`ECONNREFUSED`, `WSAECONNRESET`) is a lost datagram.
+- **Pose order** (sections 5, 7, 8, 9.4). `SendPoses` never sends an entity a `time_us` lower than the last one it sent it: it sends the last
+  value plus one microsecond (the largest value stays itself), counts it in `PoseTimeRaised`, and leaves the caller's `Pose` as it was. A pose with
+  `Wire.PoseTeleport`, and the first pose after `Spawn` (or `Despawn` and `Spawn`) of the entity, may carry any time. The receiver does the same: a
+  teleport is used whatever its time, a second `spawn` of a live entity forgets the time of its last pose, and a plain older pose is still dropped.
+- **Windows pixel paths** (section 9.6, item 5). Before any file call, `PixelFile.Reader.Open` accepts only a drive-letter path (`X:\...`,
+  `X:/...` or `\\?\X:\...`) whose last component is not a device name (`CON`, `NUL`, `COM1`, ...), and then only a drive whose
+  `DriveInfo.DriveType` is `Fixed` or `Ram`: no UNC path, device path or network drive is looked up. A directory link to a share inside an
+  accepted path is not caught (the contract's optional check of the handle's final path is not made). A `PixelFile.Writer` whose file would not
+  pass that check throws `NotSupportedException` and creates nothing: such a sender has no pixel channel.
+- **Numbers** (section 8, "Syntax of a line" 9). A number literal anywhere in a line is refused exactly when its correctly rounded double is not
+  finite: at or above 2^1024 - 2^970 in magnitude, decided on the digits against that value's 309 digits. `1.7976931348623158e308` and
+  `1.797693134862315807e308` are accepted (revision 7's code refused them), `1.797693134862315808e308` is not.
+- **A side that was not running** (sections 6, 7). A poll that finds more than a timeout since the previous poll restarts the watchdog, a
+  candidate's wait for its first line and a guest's wait for the host's `hello` at that poll. Polling less often than the timeout is not conforming.
+- **The files** (sections 6.2, 9.6). On Unix the pixel file is created with mode 0600 from the moment it exists at its path: on .NET 7+ by the
+  runtime's exclusive open with `FileStreamOptions.UnixCreateMode` (found by reflection); elsewhere as the endpoint file is, in a 0700 directory
+  beside it, set to 0600 before anything is written and given its name with `link`, which never replaces a file. The endpoint file's reader also
+  refuses, on Unix, a file that does not belong to the process's effective user. .NET has no API for a file's owner; the library asks .NET's own
+  native shim (`SystemNative_FStat`, which the runtime uses for its files on Unix) and trusts its answer only when the mode it reports agrees with
+  `File.GetUnixFileMode` on the same handle. Where the runtime cannot tell (Mono, Unity, .NET Framework, or a shim it does not recognise), the file
+  is judged by its mode alone; those runtimes refuse endpoint files anyway, since they cannot read the mode either.
+- **Error texts and peer text** (sections 6.2, 8). The reason of a `bye` sent for a refused or malformed line, and the `HandshakeFailed` or `Lost`
+  reason for it, are fixed texts that quote nothing from the line ("heartbeat_ms outside 10 to 10000", "unexpected character"). The peer's `bye`
+  reason, the `game` of its `hello` and a `spawn` name reach the application with every character below U+0020 and U+007F replaced by a space;
+  `provider`, `asset`, `path` and the token are handed on as sent.
 
 ## Authentication: the token and the endpoint file (contract revision 6, version 0.2.0)
 
@@ -125,7 +168,8 @@ var guest = Link.Guest(new LinkConfig("My Rewrite") { EndpointFile = path });
   `HandshakeFailed` reason and reads the file again before it retries. A host without a token ignores the field.
 - `LinkConfig.EndpointFile`: a host writes `{"control_port":N,"token":"..."}` there after `Bind`, atomically and owner-only from the moment the data
   exists, and deletes it in `Close()`; if the file cannot be written, creating the host throws `EndpointException` and the port is closed. A reader refuses
-  anything but a regular file of at most 4096 bytes with a valid `control_port` and `token`, and on Unix a file whose mode grants anything to the group or others.
+  anything but a regular file of at most 4096 bytes with a valid `control_port` and `token`, and on Unix a file whose mode grants anything to the group or others,
+  or, from revision 8, that belongs to another user (where the runtime can tell, see "Contract revision 8").
 - Nothing prints a token: not `LinkConfig.ToString()`, `EndpointInfo.ToString()` or `Control.Hello.ToString()`, not an exception message, an event reason or a `bye`.
 - What it protects against and what it does not (other users and processes that cannot read the file: yes; a squatter on the control port: yes, because the file is
   written only after the bind; processes of the same user and administrators: no; encryption: none) is in section 6.2 of the contract.
@@ -161,14 +205,14 @@ Revision 4, all of it implemented, each rule with a test that fails without it:
 - paced collision, at most 32 chunks per `Poll` (fewer if the OS granted a small receive buffer: Linux keeps at most
   `net.core.rmem_max`), a newer snapshot replaces queued chunks; a 4 MiB UDP receive buffer is requested;
 - a new `frame_channel` requires a new pixel reader and cleared cached pixels; datagrams are accepted only from `127.0.0.1:<peer port>`;
-- poses only for spawned entities, at most 1024 live ones (`UnknownEntity`, `SpawnIgnored`);
+- poses only for spawned entities, at most 1024 live ones (`UnknownEntity`, `SpawnIgnored`); revision 8 adds the pose order above;
 - `heartbeat_ms` 10 to 10000: out of range in a `hello` is a handshake error, in your own config it is clamped;
 - the pixel file reader: an absolute path to a regular file, width and height at most 16384, at most 2^26 pixels,
   `stride == width * 4`, checked arithmetic for every size, a length check before each read and bounded Unix positional I/O (revision 7); the
   writer: created with `FileMode.CreateNew`, never resized or truncated, the same limits, deleted at the end;
-- control lines of at most 65536 bytes, strict UTF-8, and a JSON reader that agrees with Rust's `serde_json` on every case of the
-  shared corpus (the same corpus as link-java and link-c; nothing outside it has been compared; number ranges are decided on the digits, so the answer does not depend on
-  the runtime's `double.Parse`);
+- control lines of at most 65536 bytes, strict UTF-8, and a JSON reader that agrees with the reference on every case of the
+  shared corpus (the same corpus as link-java and link-c; nothing outside it has been compared; number ranges are decided on the digits as
+  revision 8 says, so the answer does not depend on the runtime's `double.Parse`);
 - after `bye`: half-close, drain for at most 200 ms, close; a received `bye` wins over the reset that follows it (the test of this
   runs on Linux and macOS: on Windows a reset discards the unread `bye`, as the contract says).
 
@@ -217,7 +261,7 @@ dotnet run --project tests/RewriteLink.Tests -c Release       # a plain console 
 
 The tests are the C# port of link-java's and link-c's: the worked example of CONTRACT.md section 11 byte for byte, the codecs, a fuzz of
 malformed datagrams (20000 random buffers, every prefix of every valid one, 20000 mutations: only `WireException` may come out) and of
-100000 mutated control lines, 30000 junk datagrams at a live host, the JSON corpus, live sessions over loopback, every revision 4 and 5 case, and
+100000 mutated control lines, 30000 junk datagrams at a live host, the JSON corpus, live sessions over loopback, every revision 4, 5 and 8 case, and
 the seqlock under contention (a writer thread lapping a two-slot file against a reader thread: the seqlock reader accepts no torn frame,
 which is asserted; the same copy without the lock check is run alongside and the torn copies it gets are printed, not asserted), the revision 6 token and endpoint file (constant-time comparison, generation, writing and reading with
 both the runtime's calls and libc's, a live host and guest through an endpoint file, a restarted host, secrecy), and the shared test vectors (see below).

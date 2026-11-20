@@ -1,7 +1,7 @@
 # Agent guide
 
 link-cs implements rewrite-bridge's passthrough link protocol for .NET and Unity mod developers.
-It supplies host and guest roles for protocol v1, contract revision 7, alongside the Rust, Java and C implementations.
+It supplies host and guest roles for protocol v1, contract revision 8, alongside the Rust, Java and C implementations.
 
 ## Toolchain, build and CI
 
@@ -56,12 +56,17 @@ Without the .NET SDK nothing in C# can be built or run here. What can be checked
 
 - Bind and connect only to `127.0.0.1`; call `Poll()` rather than creating a library thread.
 - Keep unsafe code confined to `PixelFile` as documented in the README.
-- Native imports, all from libc and Unix only: `pread` and `preadv` in `PixelFile.cs`; `open` (read-only, two arguments), `mkdir`, `chmod`
-  and `rename` in `Endpoint.cs` (class `Posix`). `pread`, `preadv` and `open` fall back to managed I/O when the binding is missing;
-  `mkdir`, `chmod` and `rename` are used only on runtimes without the .NET 7 calls, which are found by reflection.
+- Native imports, all Unix only: from libc, `pread` and `preadv` in `PixelFile.cs`; `open` (read-only, two arguments), `mkdir`, `chmod`,
+  `rename`, `link` and `geteuid` in `Endpoint.cs` (class `Posix`); and .NET's own shim `SystemNative_FStat` (libSystem.Native) there, for the
+  endpoint file's owner. `pread`, `preadv` and `open` fall back to managed I/O when the binding is missing; `mkdir`, `chmod`, `rename` and
+  `link` are used only on runtimes without the .NET 7 calls, which are found by reflection; without `geteuid` or the shim the owner is not
+  checked (the mode still is).
 - Follow rewrite-bridge's contract and keep shared vectors plus their digest synchronized.
 - Present frames with `ReadLatest`; dispose old readers and clear cached images on channel/session loss.
 - Endpoint readers refuse token files when the runtime cannot verify permissions.
+- Revision 8's rules (candidates, bounds per poll, the connected UDP socket, pose order, Windows pixel paths, numbers, the not-running
+  rule, file owners and modes, fixed error texts and cleaned peer text) are listed in the README with how this library meets each;
+  `tests/RewriteLink.Tests/Rev8Tests.cs` tests them beside the shared vectors. Error texts for a refused line quote nothing from it.
 - Tests synthesize protocol data and need no game files; the README does not claim in-game Unity validation.
 
 ## Public files
