@@ -407,6 +407,47 @@ namespace Patodois.RewriteLink.Tests
                 }
             });
 
+            // ------------------------------------------------------------------ error texts and peer text (sections 6.2, 8)
+
+            Test("revision 8: a host's handshake error texts quote nothing from the line", () =>
+            {
+                foreach (string[] c in new[]
+                {
+                    new[] { "{\"type\":\"hello\",\"role\":\"guest\",\"game\":\"Zq7x\",\"protocol\":4321,\"min_protocol\":4321,\"udp_port\":9,\"heartbeat_ms\":250,\"timeout_ms\":2000}\n", "4321" },
+                    new[] { "{\"type\":\"hello\",\"role\":\"guest\",\"game\":\"Zq7x\",\"protocol\":1,\"min_protocol\":1,\"udp_port\":9,\"heartbeat_ms\":98765,\"timeout_ms\":2000}\n", "98765" },
+                    new[] { "{\"type\":\"hello\",\"role\":\"host\",\"game\":\"Zq7x\",\"protocol\":1,\"min_protocol\":1,\"udp_port\":9,\"heartbeat_ms\":250,\"timeout_ms\":2000}\n", "host" },
+                })
+                    using (var host = NewHost())
+                    using (var r = new Raw(host.ControlPort))
+                    {
+                        var events = new List<LinkEvent>();
+                        r.Send(c[0]);
+                        string line = null;
+                        Check(Until(2000, () => { host.Poll(events); r.Pump(); line = r.Line(); return line != null; }), "a bye");
+                        string reason = events.OfType<LinkEvent.HandshakeFailed>().Single().Reason;
+                        foreach (string text in new[] { line, reason })
+                            Check(!text.Contains(c[1]) && !text.Contains("Zq7x"), "the text quotes the line: " + text);
+                    }
+            });
+
+            Test("revision 8: text from the peer reaches the application without control characters", () =>
+            {
+                Eq(Link.ForPeople("a\u001b[2Jb\nforged\r\u0007\u007f\u0000\u009f\u00e9"), "a [2Jb forged    \u009f\u00e9", "cleaned");
+                Eq(Link.ForPeople("plain"), "plain", "nothing to clean");
+                Eq(Link.PeerSaidBye("x\ny"), "peer said bye: x y", "a bye reason");
+                using (var p = new Pair(h => h.Game = "Host\u001b]0;x\u0007\n", null))
+                {
+                    Eq(p.Guest.Peer.Game, "Host ]0;x  ", "the game of the hello");
+                    p.Guest.Spawn(new Control.Spawn(4, "P\n", "a\n", "n\u001b[0m\r\nx"));
+                    Check(Until(2000, () => { p.Pump(); return p.H<LinkEvent.Spawn>() == 1; }), "spawn");
+                    var sp = p.HE.OfType<LinkEvent.Spawn>().Single().Value;
+                    Eq(sp.Name, "n [0m  x", "a spawn name");
+                    Check(sp.Provider == "P\n" && sp.Asset == "a\n", "identifiers are handed on as sent");
+                    p.Host.Disconnect("a\nb\u007f");
+                    Check(Until(2000, () => { p.Pump(); return p.G<LinkEvent.Lost>() == 1; }), "the bye");
+                    Eq(p.GE.OfType<LinkEvent.Lost>().Single().Reason, "peer said bye: a b ", "the bye's reason");
+                }
+            });
         }
     }
 }

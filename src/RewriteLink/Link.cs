@@ -680,9 +680,9 @@ namespace Patodois.RewriteLink
             try { msg = Control.Parse(line); }
             catch (WireException e) { Refuse(ctl, "protocol error: " + e.Message, true, now); return false; }
             var b = msg as Control.Bye;
-            if (b != null) { Refuse(ctl, "peer said bye: " + b.Reason, false, now); return false; }
+            if (b != null) { Refuse(ctl, PeerSaidBye(b.Reason), false, now); return false; }
             var h = msg as Control.Hello;
-            if (h == null) { Refuse(ctl, "expected hello", true, now); return false; }
+            if (h == null) { Refuse(ctl, "expected hello as the first line", true, now); return false; }
             uint protocol, session;
             long timeout;
             string reason = CheckHello(h, out protocol, out session, out timeout);
@@ -699,6 +699,30 @@ namespace Patodois.RewriteLink
             Retire(ctl, bye ? reason : null, now);
             _events.Add(new LinkEvent.HandshakeFailed(reason));
         }
+
+        /// <summary>
+        /// Text from the peer meant for people (a bye reason, the game of a hello, a spawn name), as the application gets it: every character below
+        /// U+0020 and U+007F replaced by a space, so a peer cannot write a forged log line or a terminal escape through it (CONTRACT.md 8, revision 8).
+        /// Identifiers (provider, asset, path, token) are handed on as sent.
+        /// </summary>
+        internal static string ForPeople(string s)
+        {
+            if (s == null) return null;
+            char[] a = null;
+            for (int i = 0; i < s.Length; i++)
+            {
+                char ch = s[i];
+                if (ch < ' ' || ch == '\u007f')
+                {
+                    if (a == null) a = s.ToCharArray();
+                    a[i] = ' ';
+                }
+            }
+            return a == null ? s : new string(a);
+        }
+
+        /// <summary>The reason of the Lost or HandshakeFailed event that a bye from the peer gives: its own text, cleaned with <see cref="ForPeople"/>.</summary>
+        internal static string PeerSaidBye(string reason) { return "peer said bye: " + ForPeople(reason); }
 
         private void PollControl(long now)
         {
@@ -735,12 +759,12 @@ namespace Patodois.RewriteLink
             catch (WireException e) { reason = "protocol error: " + e.Message; bye = true; return true; }
             if (_state == State.Live) _lastHeard = now;
             var b = msg as Control.Bye;
-            if (b != null) { reason = "peer said bye: " + b.Reason; return true; }
+            if (b != null) { reason = PeerSaidBye(b.Reason); return true; }
             if (_state == State.Handshake)
             {
                 // Guest: the host's hello. (A host reads the first line of a candidate in ReadCandidate.)
                 var h = msg as Control.Hello;
-                if (h == null) { reason = "expected hello"; bye = true; return true; }
+                if (h == null) { reason = "expected hello as the first line"; bye = true; return true; }
                 uint protocol, session;
                 long timeout;
                 reason = CheckHello(h, out protocol, out session, out timeout);
@@ -767,6 +791,7 @@ namespace Patodois.RewriteLink
                 // A new entity has no pose yet, and neither has one that replaces a live entity: its next pose is used whatever its time
                 // (CONTRACT.md 7 and 8, spawn, revision 8).
                 _entities[sp.Entity] = 0;
+                sp.Name = ForPeople(sp.Name);
                 _events.Add(new LinkEvent.Spawn(sp));
                 return false;
             }
@@ -794,7 +819,8 @@ namespace Patodois.RewriteLink
 
         /// <summary>
         /// The checks of CONTRACT.md 6 on the peer's hello, the token first (6.2); null when it passes, else the reason the handshake failed. A host
-        /// also chooses the version and a new session number.
+        /// also chooses the version and a new session number. The reason is a fixed text, which quotes nothing from the line (section 8, bye,
+        /// revision 8): it names the rule, never the value.
         /// </summary>
         private string CheckHello(Control.Hello h, out uint protocol, out uint session, out long timeout)
         {
@@ -802,15 +828,14 @@ namespace Patodois.RewriteLink
             // A host with a token looks at it first, before the role, the versions or any range, and answers with this one word (CONTRACT.md 6.2):
             // a peer that did not show the token learns nothing else about the host.
             if (_role == Role.Host && _tokenBytes != null && !TokenMatches(h.Token)) return "unauthorized";
-            if (h.Role != Control.Other(_role)) return "peer claims role " + Control.RoleName(h.Role);
-            if (h.UdpPort == 0) return "peer announced udp_port 0";
+            if (h.Role != Control.Other(_role)) return "role is not " + Control.RoleName(Control.Other(_role));
+            if (h.UdpPort == 0) return "udp_port outside 1 to 65535";
             if (h.HeartbeatMs < Wire.MinHeartbeatMs || h.HeartbeatMs > Wire.MaxHeartbeatMs)
-                return "peer announced heartbeat_ms " + h.HeartbeatMs + ", outside " + Wire.MinHeartbeatMs + ".." + Wire.MaxHeartbeatMs;
+                return "heartbeat_ms outside " + Wire.MinHeartbeatMs + " to " + Wire.MaxHeartbeatMs;
             if (_role == Role.Host)
             {
                 int v = Wire.Negotiate(Wire.MinProtocolVersion, Wire.ProtocolVersion, (int)h.MinProtocol, (int)h.Protocol);
-                if (v < 0)
-                    return "unsupported protocol: peer " + h.MinProtocol + ".." + h.Protocol + ", ours " + Wire.MinProtocolVersion + ".." + Wire.ProtocolVersion;
+                if (v < 0) return "unsupported protocol: the version ranges do not overlap";
                 protocol = (uint)v;
                 var r = new byte[4];
                 using (var rng = RandomNumberGenerator.Create())
@@ -820,7 +845,7 @@ namespace Patodois.RewriteLink
             }
             else
             {
-                if (h.Protocol < Wire.MinProtocolVersion || h.Protocol > Wire.ProtocolVersion) return "host chose unsupported protocol " + h.Protocol;
+                if (h.Protocol < Wire.MinProtocolVersion || h.Protocol > Wire.ProtocolVersion) return "unsupported protocol: the host chose a version outside this side's range";
                 if (!h.Session.HasValue || h.Session.Value == 0) return "host hello without a nonzero session";
                 protocol = h.Protocol;
                 session = h.Session.Value;
@@ -845,7 +870,7 @@ namespace Patodois.RewriteLink
             ResetSession();
             _peer = new PeerInfo
             {
-                Game = h.Game, Role = h.Role, Protocol = (int)protocol, Session = session, UdpPort = (int)h.UdpPort,
+                Game = ForPeople(h.Game), Role = h.Role, Protocol = (int)protocol, Session = session, UdpPort = (int)h.UdpPort,
                 HeartbeatMs = h.HeartbeatMs, TimeoutMs = timeout,
             };
             _peerEp = new IPEndPoint(IPAddress.Loopback, (int)h.UdpPort);
