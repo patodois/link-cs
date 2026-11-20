@@ -354,6 +354,59 @@ namespace Patodois.RewriteLink.Tests
                 }
             });
 
+            // ------------------------------------------------------------------ a side that was not running (section 7)
+
+            Test("revision 8: a pause of this side's own is not the peer's silence: watchdog, candidate and guest", () =>
+            {
+                // the watchdog: two seconds without a poll and without a word; the silence counts from this poll
+                using (var host = NewHost(c => c.TimeoutMs = 400))
+                using (var r = new Raw(host.ControlPort))
+                {
+                    Session(host, r); // the guest's heartbeat of 250 ms makes the timeout 1000 ms
+                    long n = NowOf(host);
+                    SetLong(host, "_lastPoll", n - 2000); SetLong(host, "_lastHeard", n - 2000);
+                    host.Poll();
+                    Check(host.IsConnected, "after a pause longer than the timeout the peer is not lost");
+                    n = NowOf(host);
+                    SetLong(host, "_lastPoll", n - 100); SetLong(host, "_lastHeard", n - 2000);
+                    host.Poll();
+                    Check(!host.IsConnected, "a gap shorter than the timeout counts as it always did");
+                }
+                // a host's wait for a candidate's first line
+                using (var host = NewHost(c => c.TimeoutMs = 400))
+                using (var silent = Connect(host.ControlPort))
+                {
+                    Check(Until(2000, () => { host.Poll(); return Count(host, "_candidates") == 1; }), "held");
+                    long n = NowOf(host);
+                    SetLong(host, "_lastPoll", n - 2000); AgeCandidates(host, n - 2000);
+                    host.Poll();
+                    Eq(Count(host, "_candidates"), 1, "still held after a pause");
+                    n = NowOf(host);
+                    SetLong(host, "_lastPoll", n - 100); AgeCandidates(host, n - 2000);
+                    var events = host.Poll();
+                    Eq(Count(host, "_candidates"), 0, "refused after its timeout");
+                    Check(events.OfType<LinkEvent.HandshakeFailed>().Any(), "and reported");
+                }
+                // a guest's wait for the host's hello
+                using (var listener = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp))
+                {
+                    listener.Bind(Lo0);
+                    listener.Listen(4);
+                    using (var guest = Link.Guest(new LinkConfig("G") { ControlPort = ((IPEndPoint)listener.LocalEndPoint).Port, TimeoutMs = 400 }))
+                    {
+                        Check(Until(2000, () => { guest.Poll(); return StateOf(guest) == "Handshake"; }), "waiting for the host's hello");
+                        long n = NowOf(guest);
+                        SetLong(guest, "_lastPoll", n - 2000); SetLong(guest, "_since", n - 2000);
+                        guest.Poll();
+                        Eq(StateOf(guest), "Handshake", "still waiting after a pause");
+                        n = NowOf(guest);
+                        SetLong(guest, "_lastPoll", n - 100); SetLong(guest, "_since", n - 2000);
+                        guest.Poll();
+                        Check(StateOf(guest) != "Handshake", "given up after its timeout");
+                    }
+                }
+            });
+
         }
     }
 }

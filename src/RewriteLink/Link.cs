@@ -17,8 +17,9 @@ namespace Patodois.RewriteLink
 
     /// <summary>
     /// One side of a passthrough link (host or guest), protocol v1, contract revision 8. Create it with <see cref="Host"/> or <see cref="Guest"/>,
-    /// then call <see cref="Poll()"/> regularly; it never blocks. Every public method takes the link's lock, so a game thread may send while a
-    /// helper thread polls. Everything binds and connects to 127.0.0.1 only.
+    /// then call <see cref="Poll()"/> regularly, more often than the timeout (a side that polls less often is not conforming: its peer hears no
+    /// heartbeat); it never blocks. Every public method takes the link's lock, so a game thread may send while a helper thread polls. Everything
+    /// binds and connects to 127.0.0.1 only.
     /// </summary>
     public sealed class Link : IDisposable
     {
@@ -221,7 +222,7 @@ namespace Patodois.RewriteLink
         private sealed class Candidate
         {
             public readonly Ctl Ctl;
-            /// <summary>When its wait for a first line began: when it was accepted.</summary>
+            /// <summary>When its wait for a first line began: when it was accepted, or later if this side was not running (CONTRACT.md 7).</summary>
             public long Since;
             public Candidate(Ctl ctl, long since) { Ctl = ctl; Since = since; }
         }
@@ -278,6 +279,8 @@ namespace Patodois.RewriteLink
         private readonly List<Closing> _closing = new List<Closing>();
         /// <summary>Host: the connections held while no session is live, oldest first (CONTRACT.md 2, revision 8).</summary>
         private readonly List<Candidate> _candidates = new List<Candidate>();
+        /// <summary>When the previous poll began, to tell a pause of this side's own from the peer's silence (CONTRACT.md 7, revision 8).</summary>
+        private long _lastPoll;
         private readonly List<LinkEvent> _events = new List<LinkEvent>();
         private uint _seq;
         private uint _nextQuery = 1;
@@ -341,6 +344,7 @@ namespace Patodois.RewriteLink
             _heartbeatMs = Math.Max(Wire.MinHeartbeatMs, Math.Min(Wire.MaxHeartbeatMs, cfg.HeartbeatMs));
             _cfgUdpPort = cfg.UdpPort;
             _nextTry = Now();
+            _lastPoll = _nextTry;
             Socket u = null, l = null;
             try
             {
@@ -474,6 +478,8 @@ namespace Patodois.RewriteLink
             {
                 if (_closed) return;
                 long now = Now();
+                AfterAPause(now - _lastPoll, now);
+                _lastPoll = now;
                 for (int i = _closing.Count - 1; i >= 0; i--) if (!_closing[i].Pump(now)) _closing.RemoveAt(i);
                 PollConnect(now);
                 PollControl(now);
@@ -483,6 +489,22 @@ namespace Patodois.RewriteLink
                 into.AddRange(_events);
                 _events.Clear();
             }
+        }
+
+        /// <summary>
+        /// CONTRACT.md 7 (revision 8): a side that finds more than a timeout between two of its own polls was not running (suspended, stopped in a
+        /// debugger, a machine that slept) and cannot judge the other side's silence by that timeout. Every wait by which it judges the other side
+        /// starts again at this poll: the watchdog, a host's wait for a candidate's first line and a guest's wait for the host's hello. A shorter
+        /// gap counts as it always did.
+        /// </summary>
+        private void AfterAPause(long sinceLast, long now)
+        {
+            if (sinceLast > _cfgTimeoutMs)
+            {
+                foreach (Candidate c in _candidates) c.Since = now;
+                if (_state == State.Handshake) _since = now;
+            }
+            if (_state == State.Live && sinceLast > _timeoutMs) _lastHeard = now;
         }
 
         private Control.Hello MakeHello(uint protocol, uint? session)
